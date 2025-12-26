@@ -551,6 +551,14 @@ def stream_analysis(session_id):
             second_wise_severity = {}
             severity_rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, None: 0}
             
+            # OCR State for Video Analysis
+            reader = get_ocr_reader()
+            ocr_cfg = config.get('ocr_config', {})
+            ocr_mode = ocr_cfg.get('mode', 'ALWAYS').upper()
+            ocr_interval = ocr_cfg.get('interval', 5.0)
+            last_ocr_time = -ocr_interval # Force initial OCR
+            negative_patterns = config.get('negative_text', [])
+            
             frame_idx = 0
             last_sent_second = -1
             frame_skip = 2 # Process every 2nd frame
@@ -565,9 +573,50 @@ def stream_analysis(session_id):
                     frame_idx += 1
                     continue
                 
-                result = detector.detect(frame)
-                current_second = int(frame_idx / fps)
+                current_time = frame_idx / fps
+                current_second = int(current_time)
                 
+                # 1. Glitch Detection
+                result = detector.detect(frame)
+                
+                # 2. OCR Detection (Interval based)
+                should_run_ocr = False
+                if ocr_mode == "ALWAYS":
+                    should_run_ocr = True
+                elif ocr_mode == "BLACK" and result["metrics"]["signals"]["black"]:
+                    should_run_ocr = True
+                elif ocr_mode == "FREEZE" and result["metrics"]["signals"]["freeze"]:
+                    should_run_ocr = True
+                elif ocr_mode == "ACTIVE" and not (result["metrics"]["signals"]["black"] or result["metrics"]["signals"]["freeze"]):
+                    should_run_ocr = True
+
+                if reader and should_run_ocr and (current_time - last_ocr_time) >= ocr_interval:
+                    try:
+                        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                        ocr_results = reader.readtext(rgb_frame)
+                        
+                        for (bbox, text, prob) in ocr_results:
+                            if prob > 0.3:
+                                # Check against negative patterns
+                                text_lower = text.lower()
+                                matched = None
+                                for p in negative_patterns:
+                                    if p.lower() in text_lower:
+                                        matched = p
+                                        break
+                                
+                                if matched:
+                                    if current_second not in second_wise_glitches:
+                                        second_wise_glitches[current_second] = set()
+                                        second_wise_severity[current_second] = "LOW"
+                                    
+                                    second_wise_glitches[current_second].add(f"TEXT: {matched}")
+                                    second_wise_severity[current_second] = "HIGH" # Pattern match is high severity
+                        
+                        last_ocr_time = current_time
+                    except Exception as ocr_err:
+                        print(f"[Analysis OCR] Error: {ocr_err}")
+
                 if result["glitch"]:
                     if current_second not in second_wise_glitches:
                         second_wise_glitches[current_second] = set()

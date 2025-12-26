@@ -46,7 +46,8 @@ class DisplayStatusEngine:
         
         # Initialize OCR
         self.ocr_reader = config.get('ocr_reader', None)
-        self.ocr_interval = config.get('ocr_interval', 5.0) # Seconds
+        self.ocr_interval = config.get('interval', 5.0) # Seconds
+        self.ocr_mode = config.get('mode', 'ALWAYS').upper()
         self.last_ocr_time = 0
         self.last_ocr_result = None
         self.negative_text_patterns = config.get('negative_text', [])
@@ -62,9 +63,11 @@ class DisplayStatusEngine:
 
     def run_ocr(self, frame):
         if self.ocr_reader is None:
+            # print("[OCR] Reader not initialized, skipping.")
             return None
             
         try:
+            print(f"[OCR] Running OCR on frame... (patterns: {self.negative_text_patterns})", flush=True)
             # EasyOCR expects RGB (CV2 is BGR) or file path or bytes
             # CV2 internal is BGR, EasyOCR readtext handles numpy arrays
             # But better to convert to RGB to be safe/correct for model
@@ -79,10 +82,14 @@ class DisplayStatusEngine:
             
             for (bbox, text, prob) in results:
                 if prob > 0.3: # Minimum confidence
+                    print(f"[OCR] Found text: '{text}' (prob: {prob:.2f})", flush=True)
                     detected_text.append(text)
                     if not detected_pattern:
                         detected_pattern = self._match_negative_patterns(text)
                     max_conf = max(max_conf, prob)
+            
+            if detected_pattern:
+                print(f"[OCR] !!! MATCHED NEGATIVE PATTERN: '{detected_pattern}'", flush=True)
             
             full_text = " ".join(detected_text)
             
@@ -154,7 +161,17 @@ class DisplayStatusEngine:
         
         # OCR Detection
         now = time.time()
-        if (now - self.last_ocr_time) > self.ocr_interval:
+        should_run_ocr = False
+        if self.ocr_mode == "ALWAYS":
+            should_run_ocr = True
+        elif self.ocr_mode == "BLACK" and status == "BLACK":
+            should_run_ocr = True
+        elif self.ocr_mode == "FREEZE" and status == "FROZEN":
+            should_run_ocr = True
+        elif self.ocr_mode == "ACTIVE" and (status == "ACTIVE" or status == "Live"):
+            should_run_ocr = True
+
+        if should_run_ocr and (now - self.last_ocr_time) > self.ocr_interval:
             ocr_res = self.run_ocr(frame)
             if ocr_res:
                 self.last_ocr_result = ocr_res
@@ -228,6 +245,18 @@ class CLILoader:
             glitch_config = data.get('glitch_detector', {})
             if isinstance(glitch_config, dict):
                 config.update(glitch_config)
+            
+            # Load OCR configuration
+            ocr_cfg = data.get('ocr_config', {})
+            if isinstance(ocr_cfg, dict):
+                config.update(ocr_cfg)
+                if 'mode' in ocr_cfg:
+                    print(f"[CLILoader] OCR Mode set to: {ocr_cfg['mode']} (Interval: {ocr_cfg.get('interval', 5.0)}s)")
+            
+            # Load negative_text patterns
+            config['negative_text'] = data.get('negative_text', [])
+            if config['negative_text']:
+                print(f"[CLILoader] Loaded {len(config['negative_text'])} negative text patterns.")
             
             return config
 

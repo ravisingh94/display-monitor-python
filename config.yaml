@@ -25,6 +25,10 @@ glitch_detector:
   min_artifact_frames: 1
   flicker_rel_threshold: 0.1
 
+ocr_config:
+  mode: "ALWAYS"      # Options: ALWAYS, BLACK, FREEZE, ACTIVE (Live)
+  interval: 1.0       # Seconds between OCR checks
+
 negative_text:
   - "No Video Signal"
   - "No Display"
