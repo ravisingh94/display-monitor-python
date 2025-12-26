@@ -7,6 +7,24 @@ config:
   edge_threshold: 1.2
   frozen_frames: 5
 
+glitch_detector:
+  black_threshold: 0.5
+  diff_spike: 25.0
+  pixel_diff: 25
+  min_area: 0.005
+  max_area: 0.6
+  block_size: 16
+  block_anomaly_threshold: 10.0
+  block_diff_threshold: 2.0
+  block_min_variance: 0.5
+  pixel_outlier_sigma: 5.0
+  edge_energy_threshold: 8.0
+  history: 3
+  freeze_threshold: 0.05
+  min_freeze_frames: 15
+  min_artifact_frames: 1
+  flicker_rel_threshold: 0.1
+
 negative_text:
   - "No Video Signal"
   - "No Display"

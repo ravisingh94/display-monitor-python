@@ -414,7 +414,7 @@ def stream_analysis(session_id):
             # Mark as processing
             session['status'] = 'processing'
         
-        # Analysis config
+        # Default Analysis config
         config = {
             "diff_spike": 25.0,
             "pixel_diff": 25,
@@ -430,6 +430,17 @@ def stream_analysis(session_id):
             "black_threshold": 2.0,
             "flicker_rel_threshold": 0.1
         }
+        
+        # Override with config.yaml if present
+        try:
+            if os.path.exists('config.yaml'):
+                with open('config.yaml', 'r') as f:
+                    yaml_data = yaml.safe_load(f)
+                    if yaml_data and 'glitch_detector' in yaml_data:
+                        config.update(yaml_data['glitch_detector'])
+                        print(f"[Analysis] Loaded custom glitch detector config: {yaml_data['glitch_detector']}")
+        except Exception as e:
+            print(f"[Analysis] Error loading config.yaml: {e}")
         
         try:
             # Check GPU availability

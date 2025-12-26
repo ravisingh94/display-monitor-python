@@ -24,6 +24,17 @@ class GlitchDetector:
         # For freeze detection refinement
         self.consecutive_freeze_frames = 0
         self.consecutive_anomaly_frames = 0
+        self.last_metrics = {
+            "diff_score": 0.0, "area_ratio": 0.0, "block_score": 0.0, 
+            "edge_energy": 0.0, 
+            "glitch_signals": {
+                "temporal_spike": False, "localized_area": False, "pixel_glitch": False,
+                "block_glitch": False, "artifacting": False, "frame_corruption": False,
+                "freeze": False, "black": False, "flicker": False
+            }, 
+            "visual_artifact": False,
+            "mean_brightness": 0.0
+        }
 
     def detect(self, frame):
         # Resize large frames to improve performance (max width 640px)
@@ -95,7 +106,7 @@ class GlitchDetector:
             "temporal_spike": diff_score > self.cfg["diff_spike"],
             "localized_area": self.cfg["min_area"] < area_ratio < self.cfg["max_area"],
             "pixel_glitch": (outlier_ratio > 0.05 and diff_score > 1.0), 
-            "block_glitch": (block_anomaly_score > 15.0 and diff_score > 5.0),
+            "block_glitch": (block_anomaly_score > self.cfg.get("block_anomaly_threshold", 15.0) and diff_score > self.cfg.get("block_diff_threshold", 5.0)),
             "artifacting": (edge_energy > self.cfg["edge_energy_threshold"] and diff_score > 2.0),
             "frame_corruption": region_anomaly,
             "freeze": freeze_detected,
@@ -115,8 +126,7 @@ class GlitchDetector:
             )
         )
 
-        # --- Decide final glitch status ---
-        # Visual anomalies (artifacts, flicker, black) must persist to reduce noise from single-frame sensor jitters
+        # Decide final glitch status
         has_visual_anomaly = visual_artifact or glitch_signals["flicker"] or glitch_signals["black"]
         
         if has_visual_anomaly:
@@ -125,16 +135,15 @@ class GlitchDetector:
             self.consecutive_anomaly_frames = 0
             
         persistent_visual_anomaly = self.consecutive_anomaly_frames >= self.cfg.get("min_artifact_frames", 2)
-        
         glitch_now = persistent_visual_anomaly or glitch_signals["freeze"]
 
         self.history.append(glitch_now)
-        transient = glitch_now and not self.prev_glitch_now
-
+        is_start = glitch_now and not self.prev_glitch_now
+        
         self.prev_glitch_now = glitch_now
         self.prev_gray = gray
 
-        if not transient:
+        if not glitch_now:
             return self._empty_result()
 
         # Pass additional metrics for dynamic severity calculation
@@ -149,14 +158,14 @@ class GlitchDetector:
 
         return {
             "glitch": True,
+            "is_start": is_start,
             "severity": severity,
             "type": self._glitch_types(glitch_signals, visual_artifact or persistent_visual_anomaly),
             "metrics": {
-                "diff_score": float(diff_score),
-                "area_ratio": float(area_ratio),
-                "pixel_outlier_ratio": float(outlier_ratio),
-                "block_anomaly_score": float(block_anomaly_score),
-                "edge_energy": float(edge_energy),
+                "diff": float(diff_score),
+                "area": float(area_ratio),
+                "outliers": float(outlier_ratio),
+                "signals": glitch_signals
             },
             "timestamp": datetime.utcnow().isoformat() + "Z",
         }
@@ -165,6 +174,7 @@ class GlitchDetector:
         """Vectorized block variance calculation using NumPy."""
         h, w = gray.shape
         bs = self.cfg["block_size"]
+        min_v = self.cfg.get("block_min_variance", 2.0)
         
         # Crop to be divisible by block size
         h_pad = h - (h % bs)
@@ -175,7 +185,7 @@ class GlitchDetector:
         blocks = blocks.transpose(0, 2, 1, 3).reshape(-1, bs * bs)
         
         variances = blocks.var(axis=1)
-        valid_vars = variances[variances > 2.0]
+        valid_vars = variances[variances > min_v]
         
         if valid_vars.size == 0: return 0.0
         return np.max(valid_vars) / (np.mean(valid_vars) + 1e-5)

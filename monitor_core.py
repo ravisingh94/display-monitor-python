@@ -213,13 +213,22 @@ class CLILoader:
             return {}
         with open(self.monitor_config_path, 'r') as f:
             data = yaml.safe_load(f)
+            if not data: return {}
+            
             config = data.get('config', {})
+            # Handle list-style config (legacy)
             if isinstance(config, list):
                 flat = {}
                 for item in config:
                     if isinstance(item, dict):
                         flat.update(item)
-                return flat
+                config = flat
+            
+            # Merge with glitch_detector section if present
+            glitch_config = data.get('glitch_detector', {})
+            if isinstance(glitch_config, dict):
+                config.update(glitch_config)
+            
             return config
 
 class ImageProcessor:
