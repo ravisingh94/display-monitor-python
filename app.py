@@ -8,7 +8,7 @@ import copy
 import cv2
 import numpy as np
 import yaml
-from flask import Flask, send_from_directory, jsonify, request, Response
+from flask import Flask, send_from_directory, jsonify, request, Response, send_file
 
 # Fix for macOS SSL certificate errors (Critical for EasyOCR)
 try:
@@ -338,39 +338,65 @@ def detect_ocr():
 analysis_sessions = {}  # { session_id: { 'filepath': ..., 'status': ..., 'report': [] } }
 analysis_lock = threading.Lock()
 
-@app.route('/api/analyze/video', methods=['POST'])
-def analyze_video_upload():
-    """Accepts video upload and returns immediately with session ID for live streaming."""
-    if 'video' not in request.files:
-        return jsonify({'error': 'No video file part'}), 400
+@app.route('/api/utils/pick-file', methods=['GET'])
+def pick_file():
+    """Triggers a native macOS file picker and returns the absolute path."""
+    try:
+        # Use osascript to open a native Mac file picker
+        cmd = ["osascript", "-e", 'POSIX path of (choose file with prompt "Select a video file:")']
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        
+        if result.returncode == 0:
+            path = result.stdout.strip()
+            return jsonify({'path': path})
+        else:
+            # User likely cancelled
+            return jsonify({'error': 'User cancelled or picker failed'}), 400
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/analyze/local-path', methods=['POST'])
+def analyze_local_path():
+    """Starts analysis from a local system path."""
+    data = request.json
+    if not data or 'path' not in data:
+        return jsonify({'error': 'No path provided'}), 400
     
-    file = request.files['video']
-    if file.filename == '':
-        return jsonify({'error': 'No selected file'}), 400
-        
-    if file:
-        timestamp = int(time.time())
-        safe_filename = f"video_{timestamp}_{file.filename.replace(' ', '_')}"
-        filepath = os.path.join(UPLOAD_FOLDER, safe_filename)
-        file.save(filepath)
-        
-        # Generate session ID
-        session_id = f"session_{timestamp}"
-        
-        # Store session
-        with analysis_lock:
-            analysis_sessions[session_id] = {
-                'filepath': filepath,
-                'filename': safe_filename,
-                'status': 'pending',
-                'report': []
-            }
-        
-        return jsonify({
-            'status': 'uploaded',
-            'session_id': session_id,
-            'video_url': f'/uploads/{safe_filename}'
-        })
+    filepath = data['path']
+    if not os.path.exists(filepath):
+        return jsonify({'error': f'Path does not exist: {filepath}'}), 404
+    
+    if not os.path.isfile(filepath):
+        return jsonify({'error': f'Not a file: {filepath}'}), 400
+
+    timestamp = int(time.time())
+    session_id = f"session_local_{timestamp}"
+    filename = os.path.basename(filepath)
+
+    with analysis_lock:
+        analysis_sessions[session_id] = {
+            'filepath': filepath,
+            'filename': filename,
+            'status': 'pending',
+            'report': [],
+            'is_local': True
+        }
+
+    return jsonify({
+        'status': 'ready',
+        'session_id': session_id,
+        'video_url': f'/api/video/local?path={filepath}'
+    })
+
+@app.route('/api/video/local')
+def serve_local_video():
+    """Proxy for serving local video files to the browser."""
+    path = request.args.get('path')
+    if not path or not os.path.exists(path):
+        return "File not found", 404
+    
+    # Optional: Basic security check to ensure it's a video file or in allowed path
+    return send_file(path)
 
 @app.route('/api/analyze/stream/<session_id>')
 def stream_analysis(session_id):

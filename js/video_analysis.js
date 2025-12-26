@@ -126,20 +126,15 @@ function renderUI(container) {
             <main class="monitor-content" style="padding: 2rem; display: flex; flex-direction: column; align-items: center; gap: 2rem;">
                 
                 <div class="card" id="upload-card" style="width: 100%; max-width: 600px; padding: 2rem; text-align: center;">
-                    <h3>Upload Video for Analysis</h3>
+                    <h3>Local Video Analysis</h3>
                     <p style="color: var(--text-muted); margin-bottom: 2rem;">
-                        Select a video file from your local computer to analyze for visual glitches. 
-                        The analysis may take some time depending on video length.
+                        Select a video file from your computer to analyze for glitches. 
+                        The analysis runs directly on your system without uploading.
                     </p>
                     
-                    <div style="display: flex; gap: 1rem; justify-content: center; align-items: center;">
-                        <input type="file" id="video-upload-input" accept="video/*" style="display: none;" onchange="document.getElementById('file-name-display').innerText = this.files[0] ? this.files[0].name : 'No file chosen'">
-                        <button class="btn btn-secondary" onclick="document.getElementById('video-upload-input').click()">Choose File</button>
-                        <span id="file-name-display" style="color: var(--text-muted);">No file chosen</span>
-                    </div>
-
-                    <div style="margin-top: 2rem;">
-                        <button id="btn-start-analysis" class="btn btn-primary" onclick="window.startAnalysis()">Start Analysis</button>
+                    <div style="display: flex; flex-direction: column; gap: 1rem; align-items: center;">
+                        <button id="btn-pick-file" class="btn btn-primary" onclick="window.pickAndAnalyze()">Choose Video File</button>
+                        <span id="selected-file-path" style="color: var(--text-muted); font-size: 0.85rem; word-break: break-all;"></span>
                     </div>
                 </div>
 
@@ -234,7 +229,7 @@ function renderUI(container) {
     `;
 
     // Bind functions
-    window.startAnalysis = handleAnalysis;
+    window.pickAndAnalyze = pickAndAnalyze;
     window.togglePlay = togglePlay;
     window.seekVideo = seekVideo;
     window.frameStep = frameStep;
@@ -243,38 +238,41 @@ function renderUI(container) {
 
 let eventSource = null;
 
-async function handleAnalysis() {
-    const fileInput = document.getElementById('video-upload-input');
+async function pickAndAnalyze() {
     const statusDiv = document.getElementById('analysis-status');
     const loadingDiv = document.getElementById('loading-state');
     const resultsDiv = document.getElementById('results-state');
     const errorDiv = document.getElementById('error-state');
     const uploadCard = document.getElementById('upload-card');
-
-    if (!fileInput.files || fileInput.files.length === 0) {
-        alert("Please select a video file first.");
-        return;
-    }
-
-    const file = fileInput.files[0];
-    const formData = new FormData();
-    formData.append('video', file);
-
-    // UI Updates - Show loading briefly
-    uploadCard.style.display = 'none';
-    statusDiv.style.display = 'block';
-    loadingDiv.style.display = 'block';
-    resultsDiv.style.display = 'none';
-    errorDiv.style.display = 'none';
-
-    // Update loading message for upload
-    loadingDiv.querySelector('h4').innerText = 'Uploading Video...';
-    loadingDiv.querySelector('p').innerText = 'Please wait while we prepare your video.';
+    const pathSpan = document.getElementById('selected-file-path');
 
     try {
-        const response = await fetch('/api/analyze/video', {
+        // 1. Trigger Native File Picker
+        const pickRes = await fetch('/api/utils/pick-file');
+        const pickData = await pickRes.json();
+
+        if (!pickRes.ok) {
+            if (pickRes.status === 400) return; // User cancelled
+            throw new Error(pickData.error || 'Failed to open file picker');
+        }
+
+        const path = pickData.path;
+        pathSpan.innerText = `Selected: ${path}`;
+
+        // 2. Start Analysis
+        uploadCard.style.display = 'none';
+        statusDiv.style.display = 'block';
+        loadingDiv.style.display = 'block';
+        resultsDiv.style.display = 'none';
+        errorDiv.style.display = 'none';
+
+        loadingDiv.querySelector('h4').innerText = 'Initializing Analysis...';
+        loadingDiv.querySelector('p').innerText = `Opening: ${path.split('/').pop()}`;
+
+        const response = await fetch('/api/analyze/local-path', {
             method: 'POST',
-            body: formData
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path: path })
         });
 
         if (!response.ok) {
@@ -283,9 +281,8 @@ async function handleAnalysis() {
         }
 
         const data = await response.json();
-
-        if (data.status === 'uploaded') {
-            // Setup Video Player immediately
+        if (data.status === 'ready') {
+            // Setup Video Player
             videoElement = document.getElementById('analysis-video');
             videoElement.src = data.video_url;
 
@@ -298,21 +295,21 @@ async function handleAnalysis() {
             loadingDiv.style.display = 'none';
             resultsDiv.style.display = 'block';
 
-            // Update live status to "ANALYZING..."
+            // Update live status
             updateLiveStatus('analyzing', 'ANALYZING...');
 
-            // Start SSE connection for live results
+            // Start SSE connection
             subscribeToAnalysis(data.session_id);
         } else {
             throw new Error(data.error || 'Unknown error occurred');
         }
 
     } catch (error) {
-        console.error("Analysis failed:", error);
+        console.error("Local analysis failed:", error);
         loadingDiv.style.display = 'none';
         errorDiv.style.display = 'block';
         document.getElementById('error-message').innerText = error.message;
-        uploadCard.style.display = 'block'; // Allow retry
+        uploadCard.style.display = 'block';
     }
 }
 
