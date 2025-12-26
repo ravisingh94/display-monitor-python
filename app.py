@@ -542,11 +542,17 @@ def stream_analysis(session_id):
             
             frame_idx = 0
             last_sent_second = -1
+            frame_skip = 2 # Process every 2nd frame
             
             while True:
                 ret, frame = cap.read()
                 if not ret:
                     break
+                
+                # Frame skipping logic
+                if frame_idx % frame_skip != 0:
+                    frame_idx += 1
+                    continue
                 
                 result = detector.detect(frame)
                 current_second = int(frame_idx / fps)

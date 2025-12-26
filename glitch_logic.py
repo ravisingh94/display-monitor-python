@@ -26,10 +26,17 @@ class GlitchDetector:
         self.consecutive_anomaly_frames = 0
 
     def detect(self, frame):
+        # Resize large frames to improve performance (max width 640px)
+        h, w = frame.shape[:2]
+        if w > 640:
+            target_w = 640
+            target_h = int(h * (target_w / w))
+            frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
+
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
 
-        if self.prev_gray is None:
+        if self.prev_gray is None or self.prev_gray.shape != gray.shape:
             self.prev_gray = gray
             return self._empty_result()
 
@@ -51,7 +58,9 @@ class GlitchDetector:
         block_anomaly_score = self._block_variance_score(gray)
 
         # --- Edge energy (artifacting) ---
-        edges = cv2.Canny(gray, 50, 150)
+        # Resize for edge detection to speed up 
+        small_gray = cv2.resize(gray, (0,0), fx=0.5, fy=0.5, interpolation=cv2.INTER_NEAREST)
+        edges = cv2.Canny(small_gray, 50, 150)
         edge_energy = edges.mean()
 
         # --- Region-based corruption detection ---
@@ -153,18 +162,23 @@ class GlitchDetector:
         }
 
     def _block_variance_score(self, gray):
+        """Vectorized block variance calculation using NumPy."""
         h, w = gray.shape
         bs = self.cfg["block_size"]
-        vars_ = []
-        for y in range(0, h, bs):
-            for x in range(0, w, bs):
-                block = gray[y:y+bs, x:x+bs]
-                if block.size > 0:
-                    v = block.var()
-                    if v > 2.0: 
-                        vars_.append(v)
-        if not vars_: return 0.0
-        return max(vars_) / (np.mean(vars_) + 1e-5)
+        
+        # Crop to be divisible by block size
+        h_pad = h - (h % bs)
+        w_pad = w - (w % bs)
+        if h_pad <= 0 or w_pad <= 0: return 0.0
+        
+        blocks = gray[:h_pad, :w_pad].reshape(h_pad // bs, bs, w_pad // bs, bs)
+        blocks = blocks.transpose(0, 2, 1, 3).reshape(-1, bs * bs)
+        
+        variances = blocks.var(axis=1)
+        valid_vars = variances[variances > 2.0]
+        
+        if valid_vars.size == 0: return 0.0
+        return np.max(valid_vars) / (np.mean(valid_vars) + 1e-5)
 
     def _region_diff_scores(self, diff, rows=4, cols=4):
         h, w = diff.shape
