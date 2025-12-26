@@ -23,7 +23,7 @@ function renderUI(container) {
                 <div style="display:flex; gap:var(--space-sm);">
                     <button class="btn btn-secondary btn-sm" id="btn-snapshot">Capture Snapshot</button>
                     <div style="width:1px; background:var(--border-subtle); margin:0 5px;"></div>
-                    <button class="btn btn-danger btn-sm" onclick="location.reload()">Exit Monitor</button>
+                    <button class="btn btn-danger btn-sm" id="btn-exit-monitor">Exit Monitor</button>
                 </div>
             </header>
 
@@ -40,6 +40,10 @@ function renderUI(container) {
     `;
 
     document.getElementById('btn-snapshot').addEventListener('click', captureSnapshot);
+    document.getElementById('btn-exit-monitor').addEventListener('click', () => {
+        stopMonitoring();
+        navigateTo('landing-view');
+    });
 }
 
 async function loadAndStartMonitoring() {
@@ -70,9 +74,10 @@ function renderEmptyState() {
         <div style="grid-column: 1 / -1; text-align:center; padding:5rem; color:var(--text-muted);">
             <h3>No Displays Configured</h3>
             <p>Please go to Configuration Mode to define monitor regions.</p>
-            <button class="btn btn-primary" style="margin-top:1rem;" onclick="location.reload()">Return to Setup</button>
+            <button class="btn btn-primary" style="margin-top:1rem;" id="btn-return-setup">Return to Setup</button>
         </div>
     `;
+    document.getElementById('btn-return-setup').addEventListener('click', () => navigateTo('config-view'));
 }
 
 function renderGrid(displays) {
@@ -116,7 +121,7 @@ function renderGrid(displays) {
                 <span class="timestamp" id="time-${d.id}">--:--:--</span>
             </div>
         </div>
-    `}).join('');
+        `}).join('');
 
     // Expose toggleMaximize globally since onclick uses it
     window.toggleMaximize = toggleMaximize;

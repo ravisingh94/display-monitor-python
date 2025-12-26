@@ -280,6 +280,13 @@ class ImageProcessor:
                 return frame
         return None
 
+    def close(self):
+        """Releases all video capture resources."""
+        for cap in self.caps.values():
+            if cap.isOpened():
+                cap.release()
+        self.caps.clear()
+
     def get_normalized_corners(self, corners):
         """
         Reorders corners to [TL, TR, BR, BL] relative to camera axes.

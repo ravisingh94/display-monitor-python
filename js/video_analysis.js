@@ -5,6 +5,90 @@ export function initVideoAnalysisMode(container) {
 let currentReport = [];
 let videoElement = null;
 
+// Toast notification helper
+function showWarningToast(message) {
+    // Create toast container if it doesn't exist
+    let toastContainer = document.getElementById('toast-container');
+    if (!toastContainer) {
+        toastContainer = document.createElement('div');
+        toastContainer.id = 'toast-container';
+        toastContainer.style.cssText = `
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            z-index: 10000;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        `;
+        document.body.appendChild(toastContainer);
+    }
+
+    // Create toast element
+    const toast = document.createElement('div');
+    toast.style.cssText = `
+        background: #ff9800;
+        color: #000;
+        padding: 1rem 1.5rem;
+        border-radius: 8px;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        max-width: 400px;
+        animation: slideIn 0.3s ease-out;
+        font-weight: 500;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    `;
+
+    toast.innerHTML = `
+        <span style="font-size: 1.2rem;">⚠️</span>
+        <span>${message}</span>
+    `;
+
+    // Add animation
+    const style = document.createElement('style');
+    style.textContent = `
+        @keyframes slideIn {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+        @keyframes slideOut {
+            from {
+                transform: translateX(0);
+                opacity: 1;
+            }
+            to {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+        }
+    `;
+    if (!document.getElementById('toast-styles')) {
+        style.id = 'toast-styles';
+        document.head.appendChild(style);
+    }
+
+    toastContainer.appendChild(toast);
+
+    // Auto-remove after 8 seconds
+    setTimeout(() => {
+        toast.style.animation = 'slideOut 0.3s ease-in';
+        setTimeout(() => {
+            toast.remove();
+            if (toastContainer.children.length === 0) {
+                toastContainer.remove();
+            }
+        }, 300);
+    }, 8000);
+}
+
+
 function renderUI(container) {
     container.innerHTML = `
         <div class="monitor-view">
@@ -59,6 +143,14 @@ function renderUI(container) {
                                     <div id="live-overlay" style="position: absolute; top: 1rem; right: 1rem; background: rgba(0,0,0,0.7); padding: 0.5rem 1rem; border-radius: 4px; display: flex; align-items: center; gap: 0.5rem; backdrop-filter: blur(4px);">
                                         <div id="live-dot" style="width: 10px; height: 10px; border-radius: 50%; background: #444;"></div>
                                         <span id="live-status-text" style="font-weight: 600; color: #fff;">READY</span>
+                                    </div>
+                                    
+                                    <!-- GPU Status Badge -->
+                                    <div id="gpu-status-badge" style="position: absolute; top: 1rem; left: 1rem; background: rgba(0,0,0,0.7); padding: 0.5rem 1rem; border-radius: 4px; backdrop-filter: blur(4px); display: none;">
+                                        <div style="display: flex; align-items: center; gap: 0.5rem;">
+                                            <span id="gpu-icon" style="font-size: 1rem;">🖥️</span>
+                                            <span id="gpu-status-text" style="font-weight: 600; font-size: 0.85rem; color: #fff;"></span>
+                                        </div>
                                     </div>
                                 </div>
                                 
@@ -127,6 +219,8 @@ function renderUI(container) {
     window.setSpeed = setSpeed;
 }
 
+let eventSource = null;
+
 async function handleAnalysis() {
     const fileInput = document.getElementById('video-upload-input');
     const statusDiv = document.getElementById('analysis-status');
@@ -144,12 +238,16 @@ async function handleAnalysis() {
     const formData = new FormData();
     formData.append('video', file);
 
-    // UI Updates
+    // UI Updates - Show loading briefly
     uploadCard.style.display = 'none';
     statusDiv.style.display = 'block';
     loadingDiv.style.display = 'block';
     resultsDiv.style.display = 'none';
     errorDiv.style.display = 'none';
+
+    // Update loading message for upload
+    loadingDiv.querySelector('h4').innerText = 'Uploading Video...';
+    loadingDiv.querySelector('p').innerText = 'Please wait while we prepare your video.';
 
     try {
         const response = await fetch('/api/analyze/video', {
@@ -164,11 +262,8 @@ async function handleAnalysis() {
 
         const data = await response.json();
 
-        if (data.status === 'success') {
-            currentReport = data.report;
-            renderResults(data.report);
-
-            // Setup Video
+        if (data.status === 'uploaded') {
+            // Setup Video Player immediately
             videoElement = document.getElementById('analysis-video');
             videoElement.src = data.video_url;
 
@@ -177,8 +272,15 @@ async function handleAnalysis() {
             videoElement.addEventListener('play', () => updatePlayBtn(true));
             videoElement.addEventListener('pause', () => updatePlayBtn(false));
 
+            // Show video player
             loadingDiv.style.display = 'none';
             resultsDiv.style.display = 'block';
+
+            // Update live status to "ANALYZING..."
+            updateLiveStatus('analyzing', 'ANALYZING...');
+
+            // Start SSE connection for live results
+            subscribeToAnalysis(data.session_id);
         } else {
             throw new Error(data.error || 'Unknown error occurred');
         }
@@ -192,11 +294,142 @@ async function handleAnalysis() {
     }
 }
 
+function subscribeToAnalysis(sessionId) {
+    // Close existing connection if any
+    if (eventSource) {
+        eventSource.close();
+    }
+
+    eventSource = new EventSource(`/api/analyze/stream/${sessionId}`);
+
+    eventSource.onmessage = (event) => {
+        try {
+            const data = JSON.parse(event.data);
+
+            if (data.error) {
+                console.error('Analysis error:', data.error);
+                updateLiveStatus('error', 'ERROR');
+                eventSource.close();
+                return;
+            }
+
+            if (data.type === 'gpu_status') {
+                console.log('GPU status:', data.message);
+                showGPUStatus(data.message, data.available);
+            } else if (data.type === 'warning') {
+                console.warn('Analysis warning:', data.message);
+                showGPUStatus(data.message, false);
+            } else if (data.type === 'progress') {
+                updateLiveStatus('analyzing', `ANALYZING... (${data.second}s)`);
+            } else if (data.type === 'complete') {
+                // Analysis complete
+                updateLiveStatus('complete', 'COMPLETE');
+                eventSource.close();
+                console.log(`Analysis complete. Total ${data.total_seconds} seconds processed.`);
+            } else if (data.second !== undefined) {
+                // New glitch detected
+                addGlitchRow(data);
+                currentReport.push(data);
+            }
+        } catch (e) {
+            console.error('Failed to parse SSE event:', e);
+        }
+    };
+
+    eventSource.onerror = (error) => {
+        console.error('SSE connection error:', error);
+        eventSource.close();
+        updateLiveStatus('error', 'CONNECTION ERROR');
+    };
+}
+
+function updateLiveStatus(state, text) {
+    const dot = document.getElementById('live-dot');
+    const statusText = document.getElementById('live-status-text');
+
+    statusText.innerText = text;
+
+    if (state === 'analyzing') {
+        dot.style.background = '#ffad33';  // Orange
+        dot.style.boxShadow = '0 0 8px #ffad33';
+    } else if (state === 'complete') {
+        dot.style.background = '#33cc33';  // Green
+        dot.style.boxShadow = '0 0 8px #33cc33';
+    } else if (state === 'error') {
+        dot.style.background = '#ff4d4d';  // Red
+        dot.style.boxShadow = '0 0 10px #ff4d4d';
+    } else {
+        dot.style.background = '#444';
+        dot.style.boxShadow = 'none';
+    }
+}
+
+function showGPUStatus(message, isAvailable) {
+    const badge = document.getElementById('gpu-status-badge');
+    const icon = document.getElementById('gpu-icon');
+    const text = document.getElementById('gpu-status-text');
+
+    if (!badge) return;
+
+    badge.style.display = 'block';
+
+    if (isAvailable) {
+        icon.innerText = '⚡';
+        text.innerText = 'GPU Accelerated';
+        text.style.color = '#33cc33';  // Green
+    } else {
+        icon.innerText = '⚠️';
+        text.innerText = 'CPU Only (Slower)';
+        text.style.color = '#ffad33';  // Orange
+    }
+}
+
+function addGlitchRow(data) {
+    const tbody = document.getElementById('results-table-body');
+
+    // Check if tbody is empty (first result)
+    if (tbody.children.length === 1 && tbody.children[0].cells.length === 1) {
+        // Remove "No glitches" placeholder
+        tbody.innerHTML = '';
+    }
+
+    let riskColor = 'var(--text-main)';
+    if (data.severity === 'HIGH') riskColor = '#ff4d4d';
+    if (data.severity === 'MEDIUM') riskColor = '#ffad33';
+    if (data.severity === 'LOW') riskColor = '#33cc33';
+
+    const row = document.createElement('tr');
+    row.id = `row-sec-${data.second}`;
+    row.className = 'result-row';
+    row.style.cursor = 'pointer';
+    row.style.borderBottom = '1px solid var(--border-subtle)';
+    row.style.transition = 'background 0.1s';
+    row.onclick = () => window.seekToAbsolute(data.second);
+
+    row.innerHTML = `
+        <td style="padding: 0.75rem; font-family: 'JetBrains Mono', monospace;">${formatTime(data.second)}</td>
+        <td style="padding: 0.75rem;"><span style="color: ${riskColor}; font-weight: 600;">${data.severity}</span></td>
+        <td style="padding: 0.75rem; font-size: 0.9rem; color: var(--text-muted);">${data.types.join(', ')}</td>
+    `;
+
+    tbody.appendChild(row);
+
+    // Auto-scroll to bottom if user hasn't scrolled up
+    const tableContainer = tbody.closest('.table-container');
+    if (tableContainer) {
+        const isNearBottom = tableContainer.scrollTop + tableContainer.clientHeight >= tableContainer.scrollHeight - 50;
+        if (isNearBottom) {
+            row.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        }
+    }
+}
+
+
 function renderResults(report) {
     const tbody = document.getElementById('results-table-body');
 
     if (!report || report.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="3" style="padding: 2rem; text-align: center; color: var(--text-muted);">No glitches detected.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="3" style="padding: 2rem; text-align: center; color: var(--text-muted);">No glitches detected yet. Analysis in progress...</td></tr>`;
         return;
     }
 

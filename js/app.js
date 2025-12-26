@@ -44,6 +44,7 @@ export function navigateTo(viewId) {
     // Show landing if requested (back)
     if (viewId === 'landing-view') {
         document.getElementById('landing-view').classList.add('active');
+        setCameraState(false);
         return;
     }
 
@@ -64,8 +65,23 @@ export function navigateTo(viewId) {
     if (viewId === 'config-view') {
         initConfigMode(view);
     } else if (viewId === 'monitor-view') {
+        setCameraState(true);
         initMonitorMode(view);
     } else if (viewId === 'video-analysis-view') {
+        setCameraState(false);
         initVideoAnalysisMode(view);
+    } else {
+        setCameraState(false);
+    }
+}
+
+async function setCameraState(active) {
+    const endpoint = active ? '/api/monitor/start' : '/api/monitor/stop';
+    try {
+        const res = await fetch(endpoint, { method: 'POST' });
+        const data = await res.json();
+        console.log(`[CameraState] Request: ${active}, Response:`, data);
+    } catch (e) {
+        console.error(`[CameraState] Failed to set state ${active}:`, e);
     }
 }

@@ -60,6 +60,7 @@ class MonitorSystem:
         self.latest_frames = {} # { display_id: jpeg_bytes }
         self.latest_status = {} # { display_id: { status, metrics } }
         self.engines = {}
+        self.thread = None
         
         # Init Engines with OCR
         reader = get_ocr_reader()
@@ -88,6 +89,8 @@ class MonitorSystem:
         self.run_flag = False
         if self.thread:
             self.thread.join()
+        # Release hardware
+        self.processor.close()
 
     def _capture_loop(self):
         while self.run_flag:
@@ -156,6 +159,7 @@ class MonitorSystem:
                 # Loop rate control (~20 FPS)
                 time.sleep(0.05)
                 
+                
             except Exception as e:
                 print(f"[MonitorSystem] Loop error: {e}")
                 import traceback
@@ -164,12 +168,12 @@ class MonitorSystem:
 
 # Global System
 monitor_sys = MonitorSystem()
-# Start strictly if main (debugger reloader safeguard)
-if os.environ.get('WERKZEUG_RUN_MAIN') == 'true' or not app.debug:
-    monitor_sys.start()
-else:
-    # First run of reloader, or non-debug
-    monitor_sys.start()
+# Start removed for lazy loading
+# if os.environ.get('WERKZEUG_RUN_MAIN') == 'true' or not app.debug:
+#     monitor_sys.start()
+# else:
+#     # First run of reloader, or non-debug
+#     monitor_sys.start()
 
 # --- Routes ---
 
@@ -211,6 +215,28 @@ def get_monitor_status():
     with monitor_sys.lock:
         data = list(monitor_sys.latest_status.values())
     return jsonify(data)
+
+@app.route('/api/monitor/start', methods=['POST'])
+def start_monitor_system():
+    try:
+        if monitor_sys.thread and monitor_sys.thread.is_alive():
+            return jsonify({'status': 'already_running'})
+        
+        monitor_sys.run_flag = True
+        monitor_sys.start()
+        return jsonify({'status': 'started'})
+    except Exception as e:
+        print(f"Start Error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/monitor/stop', methods=['POST'])
+def stop_monitor_system():
+    try:
+        monitor_sys.stop()
+        return jsonify({'status': 'stopped'})
+    except Exception as e:
+        print(f"Stop Error: {e}")
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/config/load')
 def load_config():
@@ -308,9 +334,13 @@ def detect_ocr():
         print(f"OCR Endpoint Error: {e}")
         return jsonify({'error': str(e)}), 500
 
+# Session storage for video analysis
+analysis_sessions = {}  # { session_id: { 'filepath': ..., 'status': ..., 'report': [] } }
+analysis_lock = threading.Lock()
+
 @app.route('/api/analyze/video', methods=['POST'])
 def analyze_video_upload():
-    """Validates and processes an uploaded video file for glitches."""
+    """Accepts video upload and returns immediately with session ID for live streaming."""
     if 'video' not in request.files:
         return jsonify({'error': 'No video file part'}), 400
     
@@ -324,58 +354,237 @@ def analyze_video_upload():
         filepath = os.path.join(UPLOAD_FOLDER, safe_filename)
         file.save(filepath)
         
-        try:
-            # Run analysis
-            # Using defaults from CLI or simple config
-            config = {
-                "diff_spike": 25.0,
-                "pixel_diff": 25,
-                "min_area": 0.005,
-                "max_area": 0.6,
-                "block_size": 16,
-                "pixel_outlier_sigma": 5.0,
-                "edge_energy_threshold": 8.0,
-                "history": 3,
-                "freeze_threshold": 0.05,
-                "min_freeze_frames": 15,
-                "min_artifact_frames": 2,
-                "black_threshold": 2.0,
-                "flicker_rel_threshold": 0.1
+        # Generate session ID
+        session_id = f"session_{timestamp}"
+        
+        # Store session
+        with analysis_lock:
+            analysis_sessions[session_id] = {
+                'filepath': filepath,
+                'filename': safe_filename,
+                'status': 'pending',
+                'report': []
             }
-            
-            print(f"[Analysis] Processing {filepath}...")
-            result = process_video_second_wise(filepath, config)
-            
-            # Note: We keep the file for playback now
-            
-            if result is None:
-                 return jsonify({'error': 'Analysis failed internally'}), 500
+        
+        return jsonify({
+            'status': 'uploaded',
+            'session_id': session_id,
+            'video_url': f'/uploads/{safe_filename}'
+        })
 
-            glitches, severities = result
+@app.route('/api/analyze/stream/<session_id>')
+def stream_analysis(session_id):
+    """SSE endpoint for streaming live analysis results."""  
+    def generate():
+        # Check session exists
+        with analysis_lock:
+            if session_id not in analysis_sessions:
+                yield f"data: {json.dumps({'error': 'Invalid session'})}\n\n"
+                return
             
-            # Format for frontend
-            # list of { second: N, severity: S, types: [T1, T2] }
-            report = []
-            for sec in  sorted(glitches.keys()):
-                report.append({
-                    'second': sec,
-                    'severity': severities[sec],
-                    'types': sorted(list(glitches[sec]))
-                })
+            session = analysis_sessions[session_id]
+            filepath = session['filepath']
+            
+            # Mark as processing
+            session['status'] = 'processing'
+        
+        # Analysis config
+        config = {
+            "diff_spike": 25.0,
+            "pixel_diff": 25,
+            "min_area": 0.005,
+            "max_area": 0.6,
+            "block_size": 16,
+            "pixel_outlier_sigma": 5.0,
+            "edge_energy_threshold": 8.0,
+            "history": 3,
+            "freeze_threshold": 0.05,
+            "min_freeze_frames": 15,
+            "min_artifact_frames": 2,
+            "black_threshold": 2.0,
+            "flicker_rel_threshold": 0.1
+        }
+        
+        try:
+            # Check GPU availability
+            use_gpu = False
+            gpu_warning = None
+            import platform
+            
+            try:
+                # Check if running on Apple Silicon
+                is_apple_silicon = platform.machine() == 'arm64' and platform.system() == 'Darwin'
                 
-            return jsonify({
-                'status': 'success', 
-                'report': report,
-                'video_url': f'/uploads/{safe_filename}'
-            })
+                if is_apple_silicon:
+                    # Apple Silicon - check for actual Metal/CoreML/Accelerate support
+                    gpu_detected = False
+                    gpu_backend = None
+                    
+                    try:
+                        # Check OpenCV build info for GPU support
+                        build_info = cv2.getBuildInformation()
+                        
+                        # Check for various GPU frameworks
+                        has_metal = 'Metal' in build_info or 'METAL' in build_info
+                        has_opencl = 'OpenCL' in build_info
+                        has_accelerate = 'Accelerate' in build_info or 'LAPACK' in build_info
+                        
+                        if has_metal:
+                            gpu_detected = True
+                            gpu_backend = 'Metal'
+                            use_gpu = True
+                        elif has_opencl:
+                            gpu_detected = True
+                            gpu_backend = 'OpenCL'
+                            use_gpu = True
+                        elif has_accelerate:
+                            gpu_detected = True
+                            gpu_backend = 'Accelerate (CPU-optimized)'
+                            use_gpu = False  # Accelerate is CPU optimization, not GPU
+                        
+                        if gpu_detected and use_gpu:
+                            print(f"[Analysis] Apple Silicon GPU acceleration enabled via {gpu_backend}")
+                            success_data = {
+                                'type': 'gpu_status',
+                                'available': True,
+                                'message': f'GPU Accelerated ({gpu_backend})'
+                            }
+                            yield f"data: {json.dumps(success_data)}\n\n"
+                        else:
+                            backend_info = gpu_backend if gpu_backend else 'CPU-only build'
+                            gpu_warning = f"Apple Silicon M4 detected. Using {backend_info}."
+                            print(f"[Analysis] {gpu_warning}")
+                            
+                    except Exception as e:
+                        gpu_warning = f"Apple Silicon detected. Using CPU (OpenCV build info unavailable)."
+                        print(f"[Analysis] {gpu_warning}")
+                else:
+                    # Check for NVIDIA CUDA
+                    cuda_available = cv2.cuda.getCudaEnabledDeviceCount() > 0
+                    if cuda_available:
+                        use_gpu = True
+                        print(f"[Analysis] GPU acceleration enabled (CUDA devices: {cv2.cuda.getCudaEnabledDeviceCount()})")
+                        success_data = {
+                            'type': 'gpu_status',
+                            'available': True,
+                            'message': 'GPU Accelerated (CUDA)'
+                        }
+                        yield f"data: {json.dumps(success_data)}\n\n"
+                    else:
+                        gpu_warning = "GPU not available. Using CPU (analysis will be slower)."
+                        print(f"[Analysis] {gpu_warning}")
+            except AttributeError:
+                # cv2.cuda module not available
+                gpu_warning = "OpenCV not built with CUDA support. Using CPU (analysis will be slower)."
+                print(f"[Analysis] {gpu_warning}")
+            except Exception as e:
+                gpu_warning = f"GPU check failed: {str(e)}. Using CPU (analysis will be slower)."
+                print(f"[Analysis] {gpu_warning}")
             
-        except Exception as e:
-            print(f"Analysis Error: {e}")
-            if os.path.exists(filepath):
+            # Send GPU warning to frontend if needed
+            if gpu_warning:
+                warning_data = {
+                    'type': 'warning',
+                    'message': gpu_warning
+                }
+                yield f"data: {json.dumps(warning_data)}\n\n"
+            
+            # Process video and stream results live
+            from glitch_logic import GlitchDetector
+            
+            cap = cv2.VideoCapture(filepath)
+            if not cap.isOpened():
+                yield f"data: {json.dumps({'error': 'Could not open video'})}\n\n"
+                return
+            
+            # Try to use hardware acceleration for decoding if available
+            if use_gpu:
                 try:
-                    os.remove(filepath)
-                except: pass
-            return jsonify({'error': str(e)}), 500
+                    # Set backend to CUDA if available (this may not work on all systems)
+                    cap.set(cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY)
+                except:
+                    pass  # Hardware acceleration not supported, continue with software decoding
+            
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps <= 0:
+                fps = 30
+            
+            detector = GlitchDetector(config)
+            second_wise_glitches = {}
+            second_wise_severity = {}
+            severity_rank = {"LOW": 1, "MEDIUM": 2, "HIGH": 3, None: 0}
+            
+            frame_idx = 0
+            last_sent_second = -1
+            
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                result = detector.detect(frame)
+                current_second = int(frame_idx / fps)
+                
+                if result["glitch"]:
+                    if current_second not in second_wise_glitches:
+                        second_wise_glitches[current_second] = set()
+                        second_wise_severity[current_second] = "LOW"
+                    
+                    for g_type in result["type"]:
+                        second_wise_glitches[current_second].add(g_type)
+                    
+                    current_max = second_wise_severity[current_second]
+                    if severity_rank[result["severity"]] > severity_rank[current_max]:
+                        second_wise_severity[current_second] = result["severity"]
+                
+                # Stream out results for each new second
+                if current_second != last_sent_second and current_second in second_wise_glitches:
+                    event_data = {
+                        'second': current_second,
+                        'severity': second_wise_severity[current_second],
+                        'types': sorted(list(second_wise_glitches[current_second]))
+                    }
+                    
+                    # Send SSE event
+                    yield f"data: {json.dumps(event_data)}\n\n"
+                    
+                    # Update session
+                    with analysis_lock:
+                        session['report'].append(event_data)
+                    
+                    last_sent_second = current_second
+                
+                frame_idx += 1
+                
+                # Optional: yield progress updates every N frames
+                if frame_idx % 60 == 0:  # Every ~2 seconds at 30fps
+                    progress_data = {
+                        'type': 'progress',
+                        'second': current_second
+                    }
+                    yield f"data: {json.dumps(progress_data)}\n\n"
+            
+            cap.release()
+            
+            # Send completion event
+            completion_data = {'type': 'complete', 'total_seconds': current_second}
+            yield f"data: {json.dumps(completion_data)}\n\n"
+            
+            # Update session
+            with analysis_lock:
+                session['status'] = 'complete'
+        
+        except Exception as e:
+            print(f"Stream Analysis Error: {e}")
+            import traceback
+            traceback.print_exc()
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            
+            with analysis_lock:
+                if session_id in analysis_sessions:
+                    analysis_sessions[session_id]['status'] = 'error'
+    
+    return Response(generate(), mimetype='text/event-stream')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=True)
