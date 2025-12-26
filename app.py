@@ -19,8 +19,12 @@ else:
     ssl._create_default_https_context = _create_unverified_https_context
 
 from monitor_core import CLILoader, ImageProcessor, DisplayStatusEngine
+from glitch_logic import process_video_second_wise
 
 app = Flask(__name__, static_folder='.')
+UPLOAD_FOLDER = os.path.join(os.getcwd(), 'uploads')
+if not os.path.exists(UPLOAD_FOLDER):
+    os.makedirs(UPLOAD_FOLDER)
 
 # --- OCR Initialization ---
 ocr_reader = None
@@ -177,6 +181,10 @@ def index():
 def serve_static(path):
     return send_from_directory('.', path)
 
+@app.route('/uploads/<path:filename>')
+def serve_uploads(filename):
+    return send_from_directory(UPLOAD_FOLDER, filename)
+
 @app.route('/video_feed/<display_id>')
 def video_feed(display_id):
     """MJPEG Streaming Endpoint"""
@@ -299,6 +307,75 @@ def detect_ocr():
     except Exception as e:
         print(f"OCR Endpoint Error: {e}")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/analyze/video', methods=['POST'])
+def analyze_video_upload():
+    """Validates and processes an uploaded video file for glitches."""
+    if 'video' not in request.files:
+        return jsonify({'error': 'No video file part'}), 400
+    
+    file = request.files['video']
+    if file.filename == '':
+        return jsonify({'error': 'No selected file'}), 400
+        
+    if file:
+        timestamp = int(time.time())
+        safe_filename = f"video_{timestamp}_{file.filename.replace(' ', '_')}"
+        filepath = os.path.join(UPLOAD_FOLDER, safe_filename)
+        file.save(filepath)
+        
+        try:
+            # Run analysis
+            # Using defaults from CLI or simple config
+            config = {
+                "diff_spike": 25.0,
+                "pixel_diff": 25,
+                "min_area": 0.005,
+                "max_area": 0.6,
+                "block_size": 16,
+                "pixel_outlier_sigma": 5.0,
+                "edge_energy_threshold": 8.0,
+                "history": 3,
+                "freeze_threshold": 0.05,
+                "min_freeze_frames": 15,
+                "min_artifact_frames": 2,
+                "black_threshold": 2.0,
+                "flicker_rel_threshold": 0.1
+            }
+            
+            print(f"[Analysis] Processing {filepath}...")
+            result = process_video_second_wise(filepath, config)
+            
+            # Note: We keep the file for playback now
+            
+            if result is None:
+                 return jsonify({'error': 'Analysis failed internally'}), 500
+
+            glitches, severities = result
+            
+            # Format for frontend
+            # list of { second: N, severity: S, types: [T1, T2] }
+            report = []
+            for sec in  sorted(glitches.keys()):
+                report.append({
+                    'second': sec,
+                    'severity': severities[sec],
+                    'types': sorted(list(glitches[sec]))
+                })
+                
+            return jsonify({
+                'status': 'success', 
+                'report': report,
+                'video_url': f'/uploads/{safe_filename}'
+            })
+            
+        except Exception as e:
+            print(f"Analysis Error: {e}")
+            if os.path.exists(filepath):
+                try:
+                    os.remove(filepath)
+                except: pass
+            return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=True)

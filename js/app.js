@@ -1,5 +1,6 @@
 import { initConfigMode } from './config.js';
 import { initMonitorMode } from './monitor.js';
+import { initVideoAnalysisMode } from './video_analysis.js';
 
 // Global App State
 window.appState = {
@@ -24,6 +25,12 @@ document.addEventListener('DOMContentLoaded', () => {
     btnStartMonitor.addEventListener('click', () => {
         navigateTo('monitor-view');
     });
+
+    if (btnStartVideo) {
+        btnStartVideo.addEventListener('click', () => {
+            navigateTo('video-analysis-view');
+        });
+    }
 });
 
 export function navigateTo(viewId) {
@@ -58,5 +65,7 @@ export function navigateTo(viewId) {
         initConfigMode(view);
     } else if (viewId === 'monitor-view') {
         initMonitorMode(view);
+    } else if (viewId === 'video-analysis-view') {
+        initVideoAnalysisMode(view);
     }
 }
