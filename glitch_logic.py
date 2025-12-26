@@ -127,7 +127,9 @@ class GlitchDetector:
         )
 
         # Decide final glitch status
-        has_visual_anomaly = visual_artifact or glitch_signals["flicker"] or glitch_signals["black"]
+        # NOTE: BLACK_FRAME and FREEZE are excluded from "Glitch" status per user request
+        # as they often occur during normal display state changes (OFF/Static).
+        has_visual_anomaly = visual_artifact or glitch_signals["flicker"]
         
         if has_visual_anomaly:
             self.consecutive_anomaly_frames += 1
@@ -135,7 +137,7 @@ class GlitchDetector:
             self.consecutive_anomaly_frames = 0
             
         persistent_visual_anomaly = self.consecutive_anomaly_frames >= self.cfg.get("min_artifact_frames", 2)
-        glitch_now = persistent_visual_anomaly or glitch_signals["freeze"]
+        glitch_now = persistent_visual_anomaly
 
         self.history.append(glitch_now)
         is_start = glitch_now and not self.prev_glitch_now
@@ -249,8 +251,7 @@ class GlitchDetector:
 
     def _glitch_types(self, signals, visual_artifact):
         res = []
-        if signals["freeze"]: res.append("FREEZE")
-        if signals["black"]: res.append("BLACK_FRAME")
+        # Freeze and Black Frame removed from Glitch reporting per user request
         if signals["flicker"]: res.append("FLICKER")
         if visual_artifact:
             if signals["pixel_glitch"]: res.append("PIXEL_GLITCH")
