@@ -117,7 +117,7 @@ function renderGrid(displays) {
                 <div class="glitch-list" id="glitch-list-${d.id}"></div>
             </div>
             <div class="tile-footer">
-                <span>Cam: ${d.camId}</span>
+                <span>${d.camera_name || d.camId}</span>
                 <span class="timestamp" id="time-${d.id}">--:--:--</span>
             </div>
         </div>

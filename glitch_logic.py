@@ -64,9 +64,11 @@ class GlitchDetector:
         mean_brightness = mu
         self.brightness_history.append(mean_brightness)
         flicker_detected = False
+        flicker_intensity = 0.0
         if len(self.brightness_history) >= 6:
             recent_mean = np.mean(self.brightness_history)
             relative_jump = abs(self.brightness_history[-1] - self.brightness_history[-2]) / (recent_mean + 1e-5)
+            flicker_intensity = relative_jump  # Store intensity for severity calculation
             if relative_jump > self.cfg.get("flicker_rel_threshold", 0.1): 
                 flicker_detected = True
 
@@ -126,7 +128,15 @@ class GlitchDetector:
         if not transient:
             return self._empty_result()
 
-        severity = self._severity(diff_score, area_ratio, outlier_ratio, glitch_signals)
+        # Pass additional metrics for dynamic severity calculation
+        severity = self._severity(
+            diff_score, 
+            area_ratio, 
+            outlier_ratio, 
+            glitch_signals,
+            flicker_intensity=flicker_intensity,
+            freeze_duration=self.consecutive_freeze_frames
+        )
 
         return {
             "glitch": True,
@@ -165,14 +175,53 @@ class GlitchDetector:
                 scores.append(r.mean())
         return scores
 
-    def _severity(self, diff, area, outliers, signals):
-        if signals["freeze"]: return "LOW"
-        if signals["black"]: return "HIGH"
-        if signals["flicker"]: return "MEDIUM"
+    def _severity(self, diff, area, outliers, signals, flicker_intensity=0.0, freeze_duration=0):
+        """
+        Calculate dynamic severity based on actual glitch intensity.
+        
+        Args:
+            diff: Temporal difference score
+            area: Area ratio of change
+            outliers: Pixel outlier ratio
+            signals: Dict of glitch type flags
+            flicker_intensity: Relative brightness change (0.0-1.0+)
+            freeze_duration: Number of consecutive frozen frames
+        
+        Returns:
+            str: 'LOW', 'MEDIUM', or 'HIGH'
+        """
+        # Black screen is always HIGH severity
+        if signals["black"]: 
+            return "HIGH"
+        
+        # Freeze severity based on duration
+        if signals["freeze"]:
+            if freeze_duration > 60:  # > 2 seconds at 30fps
+                return "HIGH"
+            elif freeze_duration > 30:  # > 1 second
+                return "MEDIUM"
+            else:
+                return "LOW"
+        
+        # Flicker severity based on intensity
+        if signals["flicker"]:
+            if flicker_intensity > 0.3:  # >30% brightness change
+                return "HIGH"
+            elif flicker_intensity > 0.15:  # >15% brightness change
+                return "MEDIUM"
+            else:
+                return "LOW"
+        
+        # Visual artifacts - calculate composite score
         score = diff * 0.5 + area * 100 + outliers * 200
-        if score > 100: return "HIGH"
-        if score > 50: return "MEDIUM"
-        return "LOW"
+        
+        # Higher thresholds for visual artifacts
+        if score > 150: 
+            return "HIGH"
+        elif score > 75: 
+            return "MEDIUM"
+        else:
+            return "LOW"
 
     def _glitch_types(self, signals, visual_artifact):
         res = []
