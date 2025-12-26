@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Display Monitor | Configuration Tool</title>
+
+    <!-- Fonts: Inter for UI -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+        rel="stylesheet">
+
+    <!-- Styles -->
+    <link rel="stylesheet" href="styles/main.css?v=3">
+    <link rel="stylesheet" href="styles/components.css?v=3">
+    <link rel="stylesheet" href="styles/config.css?v=3">
+    <link rel="stylesheet" href="styles/monitor.css?v=3">
+</head>
+
+<body class="theme-dark">
+    <div id="app">
+        <!-- Views will be injected here by app.js -->
+        <div id="landing-view" class="view-container active">
+            <header class="hero-header">
+                <h1>Automotive Display Monitor</h1>
+                <p>Engineering & Validation Toolchain</p>
+            </header>
+            <div class="mode-selection">
+                <button id="btn-start-config" class="card-btn">
+                    <div class="icon-box">⚙️</div>
+                    <h3>Configuration Mode</h3>
+                    <p>Setup cameras, define displays, and calibrate perspective.</p>
+                </button>
+                <button id="btn-start-monitor" class="card-btn">
+                    <div class="icon-box">📊</div>
+                    <h3>Monitoring Mode</h3>
+                    <p>Live status dashboard for configured displays.</p>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- External Libraries -->
+
+    <!-- Scripts -->
+    <script type="module" src="js/app.js"></script>
+</body>
+
+</html>

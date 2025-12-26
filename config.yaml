@@ -1,0 +1,14 @@
+config:
+  off_brightness: 5
+  black_brightness: 15
+  noise_variance: 2
+  content_variance: 30
+  diff_threshold: 0.5
+  edge_threshold: 1.2
+  frozen_frames: 5
+
+negative_text:
+  - "No Video Signal"
+  - "No Display"
+  - "No Signal"
+  - "No Input"

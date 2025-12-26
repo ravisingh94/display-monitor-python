@@ -1,0 +1,290 @@
+/* Configuration Mode Layout */
+.config-layout {
+    display: flex;
+    height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+}
+
+/* Sidebar */
+.config-sidebar {
+    width: 320px;
+    background: var(--bg-panel);
+    border-right: 1px solid var(--border-subtle);
+    display: flex;
+    flex-direction: column;
+    z-index: 10;
+}
+
+.sidebar-header {
+    padding: var(--space-md);
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.sidebar-section {
+    padding: var(--space-md);
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.sidebar-section h3 {
+    text-transform: uppercase;
+    font-size: 0.75rem;
+    letter-spacing: 0.05em;
+    color: var(--text-muted);
+    margin-bottom: var(--space-sm);
+}
+
+.camera-list,
+.display-list {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-sm);
+}
+
+.list-item {
+    display: flex;
+    align-items: center;
+    padding: var(--space-sm);
+    background: var(--bg-element);
+    border: 1px solid transparent;
+    border-radius: 6px;
+    cursor: pointer;
+    gap: var(--space-sm);
+}
+
+.list-item:hover {
+    background: var(--bg-element-hover);
+}
+
+.list-item.selected {
+    border-color: var(--accent);
+    background: rgba(59, 130, 246, 0.1);
+}
+
+.list-item-thumb {
+    width: 40px;
+    height: 30px;
+    background: #000;
+    object-fit: cover;
+    border-radius: 4px;
+}
+
+.sidebar-footer {
+    margin-top: auto;
+    padding: var(--space-md);
+    border-top: 1px solid var(--border-subtle);
+    display: flex;
+    gap: var(--space-sm);
+}
+
+/* Main Content Area (Canvas) */
+.config-main {
+    flex: 1;
+    background: #050505;
+    /* Darker background for focus */
+    position: relative;
+    display: flex;
+    flex-direction: column;
+}
+
+.toolbar-overlay {
+    position: absolute;
+    top: var(--space-md);
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--bg-panel);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    padding: var(--space-sm);
+    display: flex;
+    gap: var(--space-sm);
+    z-index: 20;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+
+.canvas-container {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* Dot grid pattern for engineering feel */
+    background-image: radial-gradient(#333 1px, transparent 1px);
+    background-size: 20px 20px;
+}
+
+/* View Mode: Fit */
+.canvas-container.fit-view {
+    display: flex;
+    overflow: auto;
+    align-items: center;
+    justify-content: center;
+}
+
+.canvas-container.fit-view #config-canvas-layer,
+.canvas-container.fit-view #config-video-layer {
+    max-width: 95%;
+    max-height: 95%;
+    width: auto;
+    height: auto;
+    object-fit: contain;
+}
+
+/* View Mode: Native */
+.canvas-container.native-view {
+    display: flex;
+    /* Use flexbox for robust centering */
+    overflow: auto;
+    /* justify-content/align-items center causes clipping issues with overflow, 
+       so we use margin: auto on the child instead */
+}
+
+.canvas-container.native-view #config-canvas-layer,
+.canvas-container.native-view #config-video-layer {
+    max-width: none;
+    max-height: none;
+    width: auto;
+    height: auto;
+    margin: auto;
+    /* Centers item if smaller, allows safe scrolling if larger */
+    flex-shrink: 0;
+    display: block;
+}
+
+/* Ensure overlay layer matches the content size/position in JS, 
+   but for CSS native scrolling, we usually rely on the content dictating size. 
+   The overlay layer is absolute, which might be tricky with scrolling.
+   We will handle overlay positioning in JS by appending it to a wrapper 
+   or adjusting left/top based on scroll or purely on image position.
+*/
+
+#config-canvas-layer,
+#config-video-layer {
+    box-shadow: 0 0 50px rgba(0, 0, 0, 0.5);
+    /* Default base styles provided by view-mode classes */
+}
+
+/* Interactive Overlay Elements */
+.crop-box {
+    position: absolute;
+    border: 2px solid var(--accent);
+    background: rgba(59, 130, 246, 0.1);
+    cursor: move;
+}
+
+.resize-handle {
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    background: var(--accent);
+    border: 2px solid #fff;
+    border-radius: 50%;
+    z-index: 30;
+    cursor: crosshair;
+    box-shadow: 0 0 4px rgba(0, 0, 0, 0.5);
+    transition: transform 0.1s;
+}
+
+.resize-handle:hover {
+    transform: scale(1.3);
+    background: #fff;
+    border-color: var(--accent);
+}
+
+.poly-overlay {
+    pointer-events: none;
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+}
+
+.poly-shape {
+    fill: rgba(59, 130, 246, 0.1);
+    stroke: var(--accent);
+    stroke-width: 2;
+    pointer-events: auto;
+    cursor: move;
+}
+
+.poly-shape.inactive {
+    stroke: rgba(255, 255, 255, 0.5);
+    fill: transparent;
+}
+
+/* Perspective Control Points */
+.perspective-point {
+    position: absolute;
+    width: 14px;
+    height: 14px;
+    background: var(--status-warning);
+    border: 2px solid #fff;
+    border-radius: 50%;
+    cursor: pointer;
+    z-index: 40;
+    box-shadow: 0 0 4px rgba(0, 0, 0, 0.5);
+}
+
+.perspective-point:hover {
+    transform: scale(1.2);
+}
+
+/* Property Panel (Floating) */
+.property-panel {
+    position: absolute;
+    right: var(--space-md);
+    top: var(--space-md);
+    width: 280px;
+    background: var(--bg-panel);
+    border: 1px solid var(--border-subtle);
+    border-radius: 8px;
+    padding: var(--space-md);
+    z-index: 20;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+
+.panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: var(--space-md);
+}
+
+.close-btn {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 1.2rem;
+}
+
+/* Zoom Slider Styling */
+#zoom-slider {
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    background: var(--border-subtle);
+    border-radius: 2px;
+    outline: none;
+}
+
+#zoom-slider::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 12px;
+    height: 12px;
+    background: var(--accent);
+    border-radius: 50%;
+    cursor: pointer;
+    transition: transform 0.1s;
+}
+
+#zoom-slider::-webkit-slider-thumb:hover {
+    transform: scale(1.2);
+}
+
+.text-xs {
+    font-size: 0.7rem;
+}
