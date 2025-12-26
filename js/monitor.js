@@ -266,14 +266,233 @@ function stopMonitoring() {
     }
 }
 
-function captureSnapshot() {
+async function captureSnapshot() {
     const displays = window.appState.displays || [];
-    if (displays.length === 0) return;
+    if (displays.length === 0) {
+        alert('No displays to capture');
+        return;
+    }
 
-    // Snapshot logic needs to draw Images to canvas
-    // TODO: Implement cleaner snapshot for IMG tags if needed
-    // For now simple alert as placeholder or reimplement
-    alert("Snapshot feature requires update for backend mode.");
+    // Check if html2canvas is loaded
+    if (typeof html2canvas === 'undefined') {
+        alert('Snapshot library not loaded. Please refresh the page and try again.');
+        console.error('html2canvas is not defined');
+        return;
+    }
+
+    const btn = document.getElementById('btn-snapshot');
+    const originalText = btn.innerText;
+    btn.innerText = 'Capturing...';
+    btn.disabled = true;
+
+    console.log('[Snapshot] Starting capture...');
+
+    // Store original stream sources and styles to restore later
+    const streamBackup = [];
+    const styleBackup = [];
+
+    try {
+        // Get the monitor grid container
+        const gridElement = document.getElementById('monitor-grid');
+        if (!gridElement) {
+            throw new Error('Monitor grid not found');
+        }
+
+        console.log('[Snapshot] Grid element found, displays:', displays.length);
+
+        // Temporarily remove maximized state for full capture
+        const wasMaximized = maximizedDisplayId;
+        if (wasMaximized) {
+            console.log('[Snapshot] Temporarily removing maximized state');
+            toggleMaximize(wasMaximized);
+        }
+
+        // CRITICAL: Freeze MJPEG streams and preserve aspect ratio
+        console.log('[Snapshot] Freezing MJPEG streams with natural aspect ratio...');
+        for (const display of displays) {
+            const img = document.getElementById(`stream-${display.id}`);
+            if (img && img.complete && img.naturalWidth > 0) {
+                // Store original src and style
+                streamBackup.push({ id: display.id, src: img.src });
+                styleBackup.push({
+                    id: display.id,
+                    width: img.style.width,
+                    height: img.style.height,
+                    objectFit: img.style.objectFit
+                });
+
+                // Create canvas and draw current frame
+                const canvas = document.createElement('canvas');
+                canvas.width = img.naturalWidth;
+                canvas.height = img.naturalHeight;
+                const ctx = canvas.getContext('2d');
+
+                try {
+                    ctx.drawImage(img, 0, 0);
+                    // Replace stream with static image
+                    img.src = canvas.toDataURL('image/png');
+
+                    // IMPORTANT: Set image to use natural dimensions to preserve aspect ratio
+                    img.style.width = 'auto';
+                    img.style.height = 'auto';
+                    img.style.maxWidth = '100%';
+                    img.style.maxHeight = '100%';
+                    img.style.objectFit = 'contain';
+
+                    console.log(`[Snapshot] Froze stream for ${display.id} (${img.naturalWidth}x${img.naturalHeight})`);
+                } catch (e) {
+                    console.warn(`[Snapshot] Failed to freeze ${display.id}:`, e);
+                }
+            }
+        }
+
+        // Wait for frozen images to load and resize
+        await new Promise(resolve => setTimeout(resolve, 200));
+
+        // Add metadata overlay
+        const overlay = document.createElement('div');
+        overlay.id = 'snapshot-overlay';
+        overlay.style.cssText = `
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: linear-gradient(to bottom, rgba(0,0,0,0.8), transparent);
+            padding: 1rem;
+            color: white;
+            font-family: 'Inter', sans-serif;
+            z-index: 1000;
+            pointer-events: none;
+        `;
+        overlay.innerHTML = `
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <div>
+                    <h3 style="margin: 0; font-size: 1.2rem;">Display Monitoring Dashboard</h3>
+                    <p style="margin: 0.25rem 0 0 0; font-size: 0.9rem; opacity: 0.8;">${displays.length} Display${displays.length > 1 ? 's' : ''} • Backend Analysis Mode</p>
+                </div>
+                <div style="text-align: right;">
+                    <p style="margin: 0; font-size: 0.9rem;">${new Date().toLocaleDateString()}</p>
+                    <p style="margin: 0.25rem 0 0 0; font-size: 0.9rem; opacity: 0.8;">${new Date().toLocaleTimeString()}</p>
+                </div>
+            </div>
+        `;
+
+        gridElement.style.position = 'relative';
+        gridElement.insertBefore(overlay, gridElement.firstChild);
+
+        console.log('[Snapshot] Overlay added, waiting for render...');
+
+        // Wait a bit for overlay to render
+        await new Promise(resolve => setTimeout(resolve, 200));
+
+        console.log('[Snapshot] Calling html2canvas...');
+
+        // Capture using html2canvas - now with static images at natural aspect ratio
+        const canvas = await html2canvas(gridElement, {
+            backgroundColor: '#0a0a0f',
+            scale: 2,
+            logging: false,
+            useCORS: false,
+            allowTaint: true
+        });
+
+        console.log('[Snapshot] Canvas created:', canvas.width, 'x', canvas.height);
+
+        // Remove overlay
+        overlay.remove();
+
+        // Restore MJPEG streams and original styles
+        console.log('[Snapshot] Restoring MJPEG streams and styles...');
+        for (const backup of streamBackup) {
+            const img = document.getElementById(`stream-${backup.id}`);
+            if (img) {
+                img.src = backup.src;
+            }
+        }
+        for (const style of styleBackup) {
+            const img = document.getElementById(`stream-${style.id}`);
+            if (img) {
+                img.style.width = style.width;
+                img.style.height = style.height;
+                img.style.objectFit = style.objectFit;
+                img.style.maxWidth = '';
+                img.style.maxHeight = '';
+            }
+        }
+
+        // Restore maximized state if needed
+        if (wasMaximized) {
+            console.log('[Snapshot] Restoring maximized state');
+            toggleMaximize(wasMaximized);
+        }
+
+        console.log('[Snapshot] Converting to blob...');
+
+        // Convert canvas to blob
+        canvas.toBlob((blob) => {
+            if (!blob) {
+                throw new Error('Failed to create image blob');
+            }
+
+            console.log('[Snapshot] Blob created, size:', blob.size, 'bytes');
+
+            // Create download link
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+            link.download = `monitor_snapshot_${timestamp}.png`;
+            link.href = url;
+            link.click();
+
+            console.log('[Snapshot] Download triggered');
+
+            // Cleanup
+            URL.revokeObjectURL(url);
+
+            // Success feedback
+            btn.innerText = '✓ Captured!';
+            setTimeout(() => {
+                btn.innerText = originalText;
+                btn.disabled = false;
+            }, 2000);
+        }, 'image/png');
+
+    } catch (error) {
+        console.error('[Snapshot] Capture failed:', error);
+        console.error('[Snapshot] Error stack:', error.stack);
+
+        // Restore streams and styles on error
+        console.log('[Snapshot] Restoring streams and styles after error...');
+        for (const backup of streamBackup) {
+            const img = document.getElementById(`stream-${backup.id}`);
+            if (img) {
+                img.src = backup.src;
+            }
+        }
+        for (const style of styleBackup) {
+            const img = document.getElementById(`stream-${style.id}`);
+            if (img) {
+                img.style.width = style.width;
+                img.style.height = style.height;
+                img.style.objectFit = style.objectFit;
+                img.style.maxWidth = '';
+                img.style.maxHeight = '';
+            }
+        }
+
+        alert('Failed to capture snapshot: ' + error.message + '\n\nCheck browser console for details.');
+        btn.innerText = originalText;
+        btn.disabled = false;
+
+        // Remove overlay if it exists
+        const overlay = document.getElementById('snapshot-overlay');
+        if (overlay) overlay.remove();
+
+        // Restore maximized state if needed
+        if (maximizedDisplayId) {
+            toggleMaximize(maximizedDisplayId);
+        }
+    }
 }
 
 function showError(msg) {
