@@ -1,5 +1,27 @@
 export function initVideoAnalysisMode(container) {
+    // Clean up any previous state first
+    cleanupVideoAnalysis();
     renderUI(container);
+}
+
+export function cleanupVideoAnalysis() {
+    // Close SSE connection if open
+    if (eventSource) {
+        console.log('[VideoAnalysis] Closing SSE connection');
+        eventSource.close();
+        eventSource = null;
+    }
+
+    // Stop video playback
+    if (videoElement) {
+        console.log('[VideoAnalysis] Stopping video playback');
+        videoElement.pause();
+        videoElement.src = '';
+        videoElement = null;
+    }
+
+    // Clear current report
+    currentReport = [];
 }
 
 let currentReport = [];

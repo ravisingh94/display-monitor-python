@@ -1,6 +1,6 @@
 import { initConfigMode } from './config.js';
 import { initMonitorMode } from './monitor.js';
-import { initVideoAnalysisMode } from './video_analysis.js';
+import { initVideoAnalysisMode, cleanupVideoAnalysis } from './video_analysis.js';
 
 // Global App State
 window.appState = {
@@ -34,6 +34,13 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 
 export function navigateTo(viewId) {
+    // Clean up video analysis if we're navigating away from it
+    const currentActiveView = document.querySelector('.view-container.active');
+    if (currentActiveView && currentActiveView.id === 'video-analysis-view' && viewId !== 'video-analysis-view') {
+        console.log('[App] Cleaning up video analysis before navigation');
+        cleanupVideoAnalysis();
+    }
+
     // Hide all views
     document.querySelectorAll('.view-container').forEach(el => {
         el.classList.remove('active');
