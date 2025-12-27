@@ -78,23 +78,37 @@ class DisplayStatusEngine:
             return None
         
         try:
+            # EasyOCR performs better with RGB
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            
             # reader.readtext(...) returns list of (bbox, text, prob)
-            results = self.ocr_reader.readtext(frame)
-        except:
+            results = self.ocr_reader.readtext(rgb_frame)
+        except Exception as e:
+             print(f"[OCR Debug] Error in readtext: {e}")
              return None
 
         detected = False
         text_found = ""
         pattern_found = None
-
+        
+        found_any = False
         for (bbox, text, prob) in results:
-            if prob > 0.2:
+            if prob > 0.3: # Higher threshold for reliability
+                found_any = True
                 text_found += text + " "
                 match = self._match_negative_patterns(text)
                 if match:
                     detected = True
                     pattern_found = match
+                    print(f"[OCR Debug] Pattern MATCHED: '{match}' in text: '{text}' (prob: {prob:.2f})")
+                else:
+                    print(f"[OCR Debug] Detected text: '{text}' (prob: {prob:.2f})")
         
+        if not found_any and len(results) > 0:
+            # Log low confidence results for debugging
+            for (bbox, text, prob) in results:
+                print(f"[OCR Debug] LOW CONFIDENCE: '{text}' (prob: {prob:.2f})")
+
         return {
             'detected': detected,
             'text': text_found.strip(),
