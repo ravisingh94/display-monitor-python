@@ -30,7 +30,7 @@ class GlitchDetector:
             "glitch_signals": {
                 "temporal_spike": False, "localized_area": False, "pixel_glitch": False,
                 "block_glitch": False, "artifacting": False, "frame_corruption": False,
-                "freeze": False, "black": False, "flicker": False
+                "freeze": False, "black": False, "flicker": False, "noise_pixel": False
             }, 
             "visual_artifact": False,
             "mean_brightness": 0.0
@@ -44,8 +44,10 @@ class GlitchDetector:
             target_h = int(h * (target_w / w))
             frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        gray_raw = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        noise_variance = cv2.Laplacian(gray_raw, cv2.CV_64F).var()
+
+        gray = cv2.GaussianBlur(gray_raw, (5, 5), 0)
 
         if self.prev_gray is None or self.prev_gray.shape != gray.shape:
             self.prev_gray = gray
@@ -111,7 +113,8 @@ class GlitchDetector:
             "frame_corruption": region_anomaly,
             "freeze": freeze_detected,
             "black": (mean_brightness < self.cfg.get("black_threshold", 2.0)),
-            "flicker": flicker_detected
+            "flicker": flicker_detected,
+            "noise_pixel": noise_variance > self.cfg.get("noise_threshold", 500.0)
         }
 
         # --- Artifact logic ---
@@ -123,13 +126,14 @@ class GlitchDetector:
                 or glitch_signals["block_glitch"]
                 or glitch_signals["artifacting"]
                 or glitch_signals["frame_corruption"]
+                or glitch_signals["noise_pixel"]
             )
         )
 
         # Decide final glitch status
         # NOTE: BLACK_FRAME and FREEZE are excluded from "Glitch" status per user request
         # as they often occur during normal display state changes (OFF/Static).
-        has_visual_anomaly = visual_artifact or glitch_signals["flicker"]
+        has_visual_anomaly = visual_artifact or glitch_signals["flicker"] or glitch_signals["noise_pixel"]
         
         if has_visual_anomaly:
             self.consecutive_anomaly_frames += 1
@@ -155,7 +159,8 @@ class GlitchDetector:
             outlier_ratio, 
             glitch_signals,
             flicker_intensity=flicker_intensity,
-            freeze_duration=self.consecutive_freeze_frames
+            freeze_duration=self.consecutive_freeze_frames,
+            noise_variance=noise_variance
         )
 
         return {
@@ -167,6 +172,7 @@ class GlitchDetector:
                 "diff": float(diff_score),
                 "area": float(area_ratio),
                 "outliers": float(outlier_ratio),
+                "noise": float(noise_variance),
                 "signals": glitch_signals
             },
             "timestamp": datetime.utcnow().isoformat() + "Z",
@@ -201,7 +207,7 @@ class GlitchDetector:
                 scores.append(r.mean())
         return scores
 
-    def _severity(self, diff, area, outliers, signals, flicker_intensity=0.0, freeze_duration=0):
+    def _severity(self, diff, area, outliers, signals, flicker_intensity=0.0, freeze_duration=0, noise_variance=0.0):
         """
         Calculate dynamic severity based on actual glitch intensity.
         
@@ -212,6 +218,7 @@ class GlitchDetector:
             signals: Dict of glitch type flags
             flicker_intensity: Relative brightness change (0.0-1.0+)
             freeze_duration: Number of consecutive frozen frames
+            noise_variance: Variance of Laplacian
         
         Returns:
             str: 'LOW', 'MEDIUM', or 'HIGH'
@@ -239,7 +246,9 @@ class GlitchDetector:
                 return "LOW"
         
         # Visual artifacts - calculate composite score
-        score = diff * 0.5 + area * 100 + outliers * 200
+        # Normalize noise_variance to a comparable scale (approx 0-100 range for typical glitches)
+        noise_norm = min(noise_variance / 50.0, 100.0) 
+        score = diff * 0.5 + area * 100 + outliers * 200 + noise_norm
         
         # Higher thresholds for visual artifacts
         if score > 150: 
@@ -258,6 +267,7 @@ class GlitchDetector:
             if signals["block_glitch"]: res.append("BLOCK_GLITCH")
             if signals["artifacting"]: res.append("ARTIFACTING")
             if signals["frame_corruption"]: res.append("FRAME_CORRUPTION")
+            if signals["noise_pixel"]: res.append("NOISE_PIXEL")
         return res
 
     def _empty_result(self):
@@ -319,6 +329,7 @@ def main():
     parser.add_argument("--min_artifact_frames", type=int, default=2) 
     parser.add_argument("--black_threshold", type=float, default=2.0) 
     parser.add_argument("--flicker_rel_threshold", type=float, default=0.1)
+    parser.add_argument("--noise_threshold", type=float, default=500.0)
     args = parser.parse_args()
     video_path = args.input
     if not os.path.exists(video_path):

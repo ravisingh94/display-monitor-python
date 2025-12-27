@@ -40,7 +40,8 @@ class DisplayStatusEngine:
             "min_freeze_frames": self.config.get('min_freeze_frames', 15),
             "min_artifact_frames": self.config.get('min_artifact_frames', 2),
             "black_threshold": self.config.get('black_threshold', 2.0),
-            "flicker_rel_threshold": self.config.get('flicker_rel_threshold', 0.1)
+            "flicker_rel_threshold": self.config.get('flicker_rel_threshold', 0.1),
+            "noise_threshold": self.config.get('noise_threshold', 500.0)
         }
         self.glitch_detector = GlitchDetector(glitch_config)
         

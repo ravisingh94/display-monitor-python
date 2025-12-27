@@ -24,6 +24,7 @@ glitch_detector:
   min_freeze_frames: 15
   min_artifact_frames: 1
   flicker_rel_threshold: 0.1
+  noise_threshold: 500.0
 
 ocr_config:
   mode: "ALWAYS"      # Options: ALWAYS, BLACK, FREEZE, ACTIVE (Live)
