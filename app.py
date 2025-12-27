@@ -93,6 +93,7 @@ class MonitorSystem:
         self.processor.close()
 
     def _capture_loop(self):
+        frame_idx = 0
         while self.run_flag:
             try:
                 # Group displays by camera to optimize capture
@@ -103,63 +104,55 @@ class MonitorSystem:
                     cam_displays[cid].append(d)
                 
                 # Iterate cameras
-                for cid, displays in cam_displays.items():
-                    # Read single frame (efficient)
+                cids = list(cam_displays.keys())
+                for cid in cids:
+                    displays = cam_displays[cid]
                     frame = self.processor.read_frame(cid)
-                    
                     if frame is None:
-                        # Try to initialize if not open? processor methods handle this?
-                        # read_frame calls get_cap which opens if needed.
                         continue
                         
-                    # Process displays
                     for d in displays:
-                        # Extract region
-                        disp_frame = self.processor.process_display(frame, d)
-                        
-                        # Analyze
                         did = d['id']
                         try:
-                            if did not in self.engines:
-                                 print(f"[MonitorDebug] Missing engine for {did}. Initializing...", flush=True)
-                                 reader = get_ocr_reader()
-                                 global_config = self.loader.monitor_config
-                                 engine_config = copy.deepcopy(global_config)
-                                 engine_config['ocr_reader'] = reader
-                                 engine_config['ocr_interval'] = engine_config.get('ocr_interval', 5.0)
-                                 self.engines[did] = DisplayStatusEngine(engine_config)
-                                 print(f"[MonitorDebug] Engine created for {did}. Current keys: {list(self.engines.keys())}", flush=True)
-                            
-                            if did in self.engines:
-                                engine = self.engines[did]
-                                status, metrics = engine.evaluate(disp_frame)
-                            else:
-                                print(f"[MonitorDebug] CRITICAL: Engine for {did} missing after init attempt!", flush=True)
+                            # Extract region
+                            disp_frame = self.processor.process_display(frame, d)
+                            if disp_frame is None:
                                 continue
+                            
+                            if did not in self.engines:
+                                 reader = get_ocr_reader()
+                                 engine_config = copy.deepcopy(self.loader.monitor_config)
+                                 engine_config['ocr_reader'] = reader
+                                 self.engines[did] = DisplayStatusEngine(engine_config)
+                            
+                            engine = self.engines[did]
+                            status, metrics = engine.evaluate(disp_frame)
+                            
                         except Exception as inner_e:
-                             print(f"[MonitorDebug] Error processing display {did}: {inner_e}", flush=True)
+                             print(f"[MonitorDebug] Error processing display {did}: {inner_e}")
                              continue
                         
                         # Encode for Stream
-                        # Resize for bandwidth? Optional. For now send full processed res.
-                        ret, jpeg = cv2.imencode('.jpg', disp_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+                        ret, jpeg = cv2.imencode('.jpg', disp_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60]) # Lower quality for speed
+                        if not ret:
+                            continue
+
                         jpeg_bytes = jpeg.tobytes()
                         
                         # Update State
                         with self.lock:
-                            self.latest_frames[d['id']] = jpeg_bytes
-                            self.latest_status[d['id']] = {
-                                'id': d['id'],
-                                'name': d['name'],
+                            self.latest_frames[did] = jpeg_bytes
+                            self.latest_status[did] = {
+                                'id': did,
+                                'name': d.get('name', did),
                                 'timestamp': time.time() * 1000,
                                 'status': status,
                                 'metrics': metrics
                             }
                 
-                # Loop rate control (~20 FPS)
-                time.sleep(0.05)
-                
-                
+                # Faster capture loop (~30 FPS potential)
+                time.sleep(0.01)
+                frame_idx += 1
             except Exception as e:
                 print(f"[MonitorSystem] Loop error: {e}")
                 import traceback
@@ -191,9 +184,18 @@ def serve_uploads(filename):
 
 @app.route('/video_feed/<display_id>')
 def video_feed(display_id):
-    """MJPEG Streaming Endpoint"""
+    """MJPEG Streaming Endpoint (kept for compatibility)"""
     return Response(generate_stream(display_id),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/api/monitor/frame/<display_id>')
+def get_display_frame(display_id):
+    """Returns a single latest JPEG frame for a display"""
+    with monitor_sys.lock:
+        frame = monitor_sys.latest_frames.get(display_id)
+    if frame:
+        return Response(frame, mimetype='image/jpeg')
+    return "No Frame", 404
 
 def generate_stream(display_id):
     while True:
@@ -208,6 +210,20 @@ def generate_stream(display_id):
             # Wait a bit if no frame yet
             pass
         time.sleep(0.05) # Limit stream FPS to ~20
+
+@app.route('/api/monitor/snapshot')
+def get_monitor_snapshot():
+    """Returns status AND base64 frames for all displays in one go (Bypasses connection limits)"""
+    import base64
+    with monitor_sys.lock:
+        snapshot = {
+            'statuses': list(monitor_sys.latest_status.values()),
+            'frames': {
+                did: base64.b64encode(frame).decode('utf-8')
+                for did, frame in monitor_sys.latest_frames.items()
+            }
+        }
+    return jsonify(snapshot)
 
 @app.route('/api/monitor/status')
 def get_monitor_status():
@@ -261,18 +277,16 @@ def save_config():
             
         # Reload monitor system with new config
         monitor_sys.loader.load_config()
-        # Re-initialize engines if needed (optional, for now just updating displays list)
-        # Note: In a full implementation, we might want to restart capture loops or re-init engines
-        # but for simple layout updates, reloading loader.displays might be enough if MonitorSystem references it dynamically.
-        # Actually MonitorSystem.loader IS the CLILoader instance, so reloading it there updates it.
-        # However, MonitorSystem.engines are dicts keyed by ID. If IDs change, we might have stale engines.
-        # For now, let's just save. The user usually restarts for major changes or we can add re-init logic.
-        
         return jsonify({'status': 'success'})
         
     except Exception as e:
         print(f"Config Save Error: {e}")
         return jsonify({'error': str(e)}), 500
+
+@app.route('/api/cameras')
+def get_cameras():
+    """Returns cameras detected on the host machine"""
+    return jsonify(ImageProcessor.discover_cameras())
 
 
 @app.route('/api/monitor/config')

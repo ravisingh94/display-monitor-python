@@ -4,6 +4,7 @@ import yaml
 import os
 import json
 import time
+import threading
 from glitch_logic import GlitchDetector
 
 class DisplayStatusEngine:
@@ -50,8 +51,12 @@ class DisplayStatusEngine:
         self.ocr_interval = config.get('interval', 5.0) # Seconds
         self.ocr_mode = config.get('mode', 'ALWAYS').upper()
         self.last_ocr_time = 0
-        self.last_ocr_result = None
         self.negative_text_patterns = config.get('negative_text', [])
+        
+        # Async OCR state
+        self.ocr_lock = threading.Lock()
+        self.ocr_thread = None
+        self.last_ocr_result = None
 
     def _match_negative_patterns(self, text):
         if not text:
@@ -62,47 +67,39 @@ class DisplayStatusEngine:
                 return pattern
         return None
 
-    def run_ocr(self, frame):
-        if self.ocr_reader is None:
-            # print("[OCR] Reader not initialized, skipping.")
+    def _ocr_worker(self, frame):
+        """Internal worker to run OCR without blocking main loop"""
+        res = self.run_ocr_core(frame)
+        with self.ocr_lock:
+            self.last_ocr_result = res
+
+    def run_ocr_core(self, frame):
+        if not self.ocr_reader:
             return None
-            
+        
         try:
-            print(f"[OCR] Running OCR on frame... (patterns: {self.negative_text_patterns})", flush=True)
-            # EasyOCR expects RGB (CV2 is BGR) or file path or bytes
-            # CV2 internal is BGR, EasyOCR readtext handles numpy arrays
-            # But better to convert to RGB to be safe/correct for model
-            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            
-            results = self.ocr_reader.readtext(rgb_frame)
-            # results is list of (bbox, text, prob)
-            
-            detected_text = []
-            detected_pattern = None
-            max_conf = 0
-            
-            for (bbox, text, prob) in results:
-                if prob > 0.3: # Minimum confidence
-                    print(f"[OCR] Found text: '{text}' (prob: {prob:.2f})", flush=True)
-                    detected_text.append(text)
-                    if not detected_pattern:
-                        detected_pattern = self._match_negative_patterns(text)
-                    max_conf = max(max_conf, prob)
-            
-            if detected_pattern:
-                print(f"[OCR] !!! MATCHED NEGATIVE PATTERN: '{detected_pattern}'", flush=True)
-            
-            full_text = " ".join(detected_text)
-            
-            return {
-                'detected': bool(detected_pattern),
-                'text': full_text,
-                'pattern': detected_pattern,
-                'confidence': float(max_conf)
-            }
-        except Exception as e:
-            print(f"OCR Error: {e}")
-            return None
+            # reader.readtext(...) returns list of (bbox, text, prob)
+            results = self.ocr_reader.readtext(frame)
+        except:
+             return None
+
+        detected = False
+        text_found = ""
+        pattern_found = None
+
+        for (bbox, text, prob) in results:
+            if prob > 0.2:
+                text_found += text + " "
+                match = self._match_negative_patterns(text)
+                if match:
+                    detected = True
+                    pattern_found = match
+        
+        return {
+            'detected': detected,
+            'text': text_found.strip(),
+            'pattern': pattern_found
+        }
     def evaluate(self, frame):
         """
         Evaluates a BGR frame and returns (status, metrics)
@@ -173,11 +170,15 @@ class DisplayStatusEngine:
             should_run_ocr = True
 
         if should_run_ocr and (now - self.last_ocr_time) > self.ocr_interval:
-            ocr_res = self.run_ocr(frame)
-            if ocr_res:
-                self.last_ocr_result = ocr_res
-                # print(f"DEBUG: OCR Result: {ocr_res}")
-            self.last_ocr_time = now
+        # Start async OCR if not currently running
+            if self.ocr_thread is None or not self.ocr_thread.is_alive():
+                self.ocr_thread = threading.Thread(target=self._ocr_worker, args=(frame.copy(),))
+                self.ocr_thread.start()
+                self.last_ocr_time = now
+        
+        # Get latest known OCR result
+        with self.ocr_lock:
+            ocr_res = self.last_ocr_result
             
         metrics = {
             'brightness': float(brightness),
@@ -188,15 +189,16 @@ class DisplayStatusEngine:
             'glitch_severity': glitch_result['severity'],
             'glitch_type': glitch_result['type'],
             'frozen_counter': self.frozen_counter,
-            'ocr_detected': self.last_ocr_result['detected'] if self.last_ocr_result else False,
-            'ocr_text': self.last_ocr_result['text'] if self.last_ocr_result else '',
-            'ocr_pattern': self.last_ocr_result['pattern'] if self.last_ocr_result else None
+            'ocr_detected': ocr_res['detected'] if ocr_res else False,
+            'ocr_text': ocr_res['text'] if ocr_res else '',
+            'ocr_pattern': ocr_res['pattern'] if ocr_res else None
         }
         
         return status, metrics
 
 class CLILoader:
-    def __init__(self, display_config_path='display_config.yaml', monitor_config_path='config.yaml'):
+    def __init__(self
+, display_config_path='display_config.yaml', monitor_config_path='config.yaml'):
         self.display_config_path = display_config_path
         self.monitor_config_path = monitor_config_path
         self.load_config()
@@ -264,31 +266,60 @@ class CLILoader:
 class ImageProcessor:
     def __init__(self):
         self.caps = {}
+        self._failed_caps = set()
 
     def get_cap(self, cam_id):
         if cam_id in self.caps:
             return self.caps[cam_id]
         
-        # In macOS, cam_id passed is usually the label if system_profiler was used, 
-        # or it could be an index. CV2 needs index or a string for some drivers.
-        # We'll try index 0 for now as a fallback or try to find index from device name logic.
-        # For this tool, we assume cam_id is either an index or we try common indices.
+        if cam_id in self._failed_caps:
+            return None
         
+        # Determine index or path
         try:
             # Try parsing cam_id as index
             idx = int(cam_id)
         except:
-            # Fallback to index 0 if not numeric
-            idx = 0
+            # If it's a string path or hardware ID
+            idx = cam_id
             
+            # If it looks like a browser hash (not a path), don't even try to open it
+            # Browser hashes are usually long hex strings without paths
+            if isinstance(idx, str) and not (os.path.sep in idx or idx.startswith(('rtsp://', 'http://'))):
+                if len(idx) > 32:
+                    print(f"[ImageProcessor] Skipping browser-side ID hash: {idx[:8]}...")
+                    self._failed_caps.add(cam_id)
+                    return None
+
+        # print(f"[ImageProcessor] Opening camera: {idx}")
         cap = cv2.VideoCapture(idx)
         if cap.isOpened():
             # Explicitly set resolution to a common stable format
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
             self.caps[cam_id] = cap
+            if cam_id in self._failed_caps: self._failed_caps.remove(cam_id)
             return cap
+        
+        print(f"[ImageProcessor] Failed to open camera: {idx}")
+        self._failed_caps.add(cam_id)
         return None
+
+    @staticmethod
+    def discover_cameras():
+        """Probes common indices to find available cameras on host."""
+        available = []
+        # Probe first 5 indices
+        for i in range(5):
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                available.append({
+                    "id": str(i),
+                    "name": f"Host Camera {i}",
+                    "type": "stream"
+                })
+                cap.release()
+        return available
 
     def read_frame(self, cam_id):
         """

@@ -30,11 +30,52 @@
 }
 
 .display-grid {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-xl);
+    max-width: 1600px;
+    margin: 0 auto;
+}
+
+.camera-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-md);
+}
+
+.camera-group-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-sm);
+    padding: var(--space-sm) var(--space-md);
+    background: rgba(255, 255, 255, 0.03);
+    border-left: 4px solid var(--accent);
+    border-radius: 4px;
+}
+
+.camera-group-header .icon {
+    font-size: 1.2rem;
+}
+
+.camera-group-header .name {
+    font-weight: 600;
+    color: var(--text-primary);
+    font-size: 1rem;
+}
+
+.camera-group-header .count {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    margin-left: auto;
+    background: rgba(255, 255, 255, 0.05);
+    padding: 2px 8px;
+    border-radius: 10px;
+}
+
+.camera-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
     gap: var(--space-lg);
-    max-width: 1600px;
-    margin: 0 auto;
 }
 
 /* Display Tile/Card */

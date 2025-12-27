@@ -172,40 +172,46 @@ async function saveConfig() {
     }
 }
 
-function fetchCameras() {
+async function fetchCameras() {
     const list = document.getElementById('camera-list');
-    if (list) list.innerHTML = '<div style="padding:10px; color:var(--text-muted);">Requesting permissions...</div>';
+    if (list) list.innerHTML = '<div style="padding:10px; color:var(--text-muted);">Discovering cameras...</div>';
 
-    navigator.mediaDevices.getUserMedia({ video: true })
-        .then(stream => {
-            stream.getTracks().forEach(track => track.stop());
-            return navigator.mediaDevices.enumerateDevices();
-        })
-        .then(devices => {
-            const videoDevices = devices.filter(d => d.kind === 'videoinput');
-            window.appState.cameras = videoDevices.map(d => ({
-                id: d.deviceId,
-                name: d.label || `Camera ${d.deviceId.slice(0, 5)}...`,
+    try {
+        // 1. Fetch backend cameras (ground truth for monitoring)
+        const resp = await fetch('/api/cameras');
+        const hostCameras = await resp.json(); // [{id: '0', name: 'Host Camera 0'}, ...]
+
+        // 2. Fetch browser cameras (for preview)
+        let browserDevices = [];
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            stream.getTracks().forEach(t => t.stop());
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            browserDevices = devices.filter(d => d.kind === 'videoinput');
+        } catch (e) {
+            console.warn('Browser camera access denied/unavailable');
+        }
+
+        // 3. Populate appState.cameras with host devices
+        window.appState.cameras = hostCameras.map((hc, index) => {
+            // Assume order might match for local session, else just use backend ID
+            const browserMatch = browserDevices[index];
+            return {
+                id: hc.id, // backend ID/index (for saving)
+                name: hc.name,
+                deviceId: browserMatch ? browserMatch.deviceId : hc.id, // for getUserMedia preview
                 type: 'stream'
-            }));
-
-            // Perform global fuzzy match once hardware is known
-            autoFuzzyMatch();
-
-            renderCameraList();
-            renderDisplayList();
-        })
-        .catch(err => {
-            console.error('Camera access error:', err);
-            fetch('/api/cameras')
-                .then(res => res.json())
-                .then(data => {
-                    window.appState.cameras = data;
-                    autoFuzzyMatch();
-                    renderCameraList();
-                    renderDisplayList();
-                });
+            };
         });
+
+        autoFuzzyMatch();
+        renderCameraList();
+        renderDisplayList();
+
+    } catch (error) {
+        console.error('Fetch cameras failed:', error);
+        if (list) list.innerHTML = '<div style="padding:10px; color:var(--status-error);">Discovery service unavailable</div>';
+    }
 }
 
 /**
@@ -772,7 +778,8 @@ window.selectCamera = function (id) {
     stopActiveStream();
 
     if (cam.type === 'stream') {
-        navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: id } } })
+        const constraintId = cam.deviceId || id;
+        navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: constraintId } } })
             .then(stream => {
                 video.srcObject = stream;
                 video.style.display = 'block';

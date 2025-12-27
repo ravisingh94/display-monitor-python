@@ -4,10 +4,7 @@ import { initVideoAnalysisMode, cleanupVideoAnalysis } from './video_analysis.js
 
 // Global App State
 window.appState = {
-    cameras: [
-        { id: 'cam1', name: 'Interior Camera 01 (Fish-eye)', src: 'assets/camera_feed_01.png' },
-        { id: 'cam2', name: 'Cluster Camera', src: 'assets/camera_feed_01.png' } // Reusing same img for demo
-    ],
+    cameras: [],
     selectedCameraId: null,
     displays: []
 };

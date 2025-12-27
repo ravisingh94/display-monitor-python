@@ -83,45 +83,61 @@ function renderEmptyState() {
 function renderGrid(displays) {
     const grid = document.getElementById('monitor-grid');
 
-    grid.innerHTML = displays.map(d => {
-        // Backend handles cropping/warping, so we just show the stream 
-        // Aspect ratio is determined by the config w/h
+    // Group displays by camera
+    const groups = {};
+    displays.forEach(d => {
+        const camLabel = d.camera_name || d.camId || 'Unknown Camera';
+        if (!groups[camLabel]) groups[camLabel] = [];
+        groups[camLabel].push(d);
+    });
 
+    grid.innerHTML = Object.entries(groups).map(([camLabel, camDisplays]) => {
         return `
-        <div class="display-tile state-active" id="tile-${d.id}">
-            <div class="tile-header">
-                <span class="tile-title">${d.name}</span>
-                <div style="display:flex; gap:4px;">
-                    <button class="btn-view-toggle" id="btn-fit-${d.id}" onclick="window.toggleFit('${d.id}', event)" title="Fit/Fill">
-                        ↔
-                    </button>
-                    <button class="btn-view-toggle" id="btn-max-${d.id}" onclick="window.toggleMaximize('${d.id}', event)" title="Maximize">
-                        ⛶
-                    </button>
-                </div>
-                <div class="status-badge badge-unknown" id="badge-${d.id}">
-                    <span class="status-dot"></span>
-                    <span class="status-text" id="status-text-${d.id}">CONNECTING</span>
-                </div>
+        <div class="camera-group">
+            <div class="camera-group-header">
+                <span class="icon">📹</span>
+                <span class="name">${camLabel}</span>
+                <span class="count">${camDisplays.length} Display${camDisplays.length > 1 ? 's' : ''}</span>
             </div>
-            <div class="tile-body tile-body-fit" id="tile-body-${d.id}">
-                <!-- MJPEG Stream Source -->
-                <img id="stream-${d.id}" src="/video_feed/${d.id}" 
-                     style="width:100%; height:100%; object-fit:contain; display:block;"
-                     onerror="this.style.display='none'; document.getElementById('err-${d.id}').style.display='block';">
-                
-                <div id="err-${d.id}" style="display:none; color:var(--text-muted); text-align:center; padding:2rem;">
-                    No Signal
-                </div>
-
-                <div class="glitch-list" id="glitch-list-${d.id}"></div>
-            </div>
-            <div class="tile-footer">
-                <span>${d.camera_name || d.camId}</span>
-                <span class="timestamp" id="time-${d.id}">--:--:--</span>
+            <div class="camera-grid">
+                ${camDisplays.map(d => `
+                    <div class="display-tile state-active" id="tile-${d.id}">
+                        <div class="tile-header">
+                            <span class="tile-title">${d.name}</span>
+                            <div style="display:flex; gap:4px;">
+                                <button class="btn-view-toggle" id="btn-fit-${d.id}" onclick="window.toggleFit('${d.id}', event)" title="Fit/Fill">
+                                    ↔
+                                </button>
+                                <button class="btn-view-toggle" id="btn-max-${d.id}" onclick="window.toggleMaximize('${d.id}', event)" title="Maximize">
+                                    ⛶
+                                </button>
+                            </div>
+                            <div class="status-badge badge-unknown" id="badge-${d.id}">
+                                <span class="status-dot"></span>
+                                <span class="status-text" id="status-text-${d.id}">CONNECTING</span>
+                            </div>
+                        </div>
+                        <div class="tile-body tile-body-fit" id="tile-body-${d.id}">
+                            <img id="stream-${d.id}" src="" 
+                                 style="width:100%; height:100%; object-fit:contain; display:block;"
+                                 onerror="document.getElementById('err-${d.id}').style.display='block';">
+                            
+                            <div id="err-${d.id}" style="display:none; color:var(--text-muted); text-align:center; padding:2rem;">
+                                No Signal
+                            </div>
+            
+                            <div class="glitch-list" id="glitch-list-${d.id}"></div>
+                        </div>
+                        <div class="tile-footer">
+                            <span>ID: ${d.id.slice(-6)}</span>
+                            <span class="timestamp" id="time-${d.id}">--:--:--</span>
+                        </div>
+                    </div>
+                `).join('')}
             </div>
         </div>
-        `}).join('');
+        `;
+    }).join('');
 
     // Expose toggleMaximize globally since onclick uses it
     window.toggleMaximize = toggleMaximize;
@@ -130,23 +146,43 @@ function renderGrid(displays) {
 function startPollingLoop() {
     isMonitoring = true;
 
-    const poll = async () => {
-        if (!isMonitoring) return;
+    // Start Snapshot Polling (High FPS)
+    async function snapshotPoll() {
+        if (!isMonitoring) return; // Use isMonitoring for consistency with existing code
 
         try {
-            const res = await fetch('/api/monitor/status');
-            if (res.ok) {
-                const statuses = await res.json();
-                updateUI(statuses);
+            const res = await fetch('/api/monitor/snapshot');
+            const data = await res.json();
+
+            // 1. Update Statuses/Metrics
+            if (data.statuses) {
+                data.statuses.forEach(d => {
+                    updateDisplayStatusUI(d.id, d.status, d.metrics, d.timestamp);
+                });
+            }
+
+            // 2. Update Frames (Base64)
+            if (data.frames) {
+                for (const [id, b64] of Object.entries(data.frames)) {
+                    const img = document.getElementById(`stream-${id}`);
+                    if (img) {
+                        img.src = `data:image/jpeg;base64,${b64}`;
+                        const err = document.getElementById(`err-${id}`);
+                        if (err) err.style.display = 'none';
+                    }
+                }
             }
         } catch (e) {
-            console.warn("Status poll failed", e);
+            console.warn("Snapshot poll failed", e);
         }
-    };
 
-    // Poll every 500ms
-    pollingIntervalId = setInterval(poll, 500);
-    poll(); // Initial call
+        // Schedule next update
+        if (isMonitoring) { // Use isMonitoring for consistency
+            pollingIntervalId = setTimeout(snapshotPoll, 50); // ~20 FPS target
+        }
+    }
+
+    snapshotPoll();
 }
 
 function updateUI(statuses) {
