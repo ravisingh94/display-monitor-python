@@ -588,12 +588,13 @@ class MonitorSystem:
                         num_frames = int(elapsed / interval)
                         tiled = self._get_tiled_frame()
                         
-                        if tiled is not None:
+                        if tiled is not None and self.sess_path:
                             with self.sess_lock:
                                 if self.sess_video is None:
                                     h, w = tiled.shape[:2]
                                     v_path = os.path.join(self.sess_path, "combined_monitoring.mp4")
-                                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                                    # Use avc1 (H.264) for web compatibility
+                                    fourcc = cv2.VideoWriter_fourcc(*'avc1')
                                     # Use a higher bitrate if possible, but standard is fine
                                     self.sess_video = cv2.VideoWriter(v_path, fourcc, 10.0, (w, h))
                                 
@@ -1262,6 +1263,77 @@ def api_monitor_stop():
         'status': 'stopped',
         'path': path
     })
+
+@app.route('/api/sessions/list')
+def list_sessions():
+    """List all recorded monitor sessions"""
+    sessions_dir = os.path.join(os.getcwd(), "sessions")
+    if not os.path.exists(sessions_dir):
+        return jsonify({'sessions': []})
+    
+    sessions = []
+    for d in sorted(os.listdir(sessions_dir), reverse=True):
+        path = os.path.join(sessions_dir, d)
+        if os.path.isdir(path) and d.startswith("session_"):
+            # Check for events.log and video
+            has_log = os.path.exists(os.path.join(path, "events.log"))
+            has_video = os.path.exists(os.path.join(path, "combined_monitoring.mp4"))
+            
+            # Get folder creation time
+            mtime = os.path.getmtime(path)
+            
+            sessions.append({
+                'id': d,
+                'path': path,
+                'created': time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mtime)),
+                'timestamp': mtime,
+                'has_log': has_log,
+                'has_video': has_video
+            })
+    
+    return jsonify({'sessions': sessions})
+
+@app.route('/api/sessions/<session_id>/events')
+def get_session_events(session_id):
+    """Parse and return events from a session's events.log"""
+    sessions_dir = os.path.join(os.getcwd(), "sessions")
+    log_path = os.path.join(sessions_dir, session_id, "events.log")
+    
+    if not os.path.exists(log_path):
+        return jsonify({'error': 'Log file not found'}), 404
+    
+    events = []
+    # Regex: [2025-12-28 01:43:17] [display_name] TYPE: MESSAGE
+    import re
+    # Match [ts] [display] TYPE: MSG  OR [ts] TYPE: MSG
+    pattern = re.compile(r'\[(?P<ts>.*?)\]\s+(?:\[(?P<display>.*?)\]\s+)?(?P<type>.*?):\s+(?P<msg>.*)')
+    
+    try:
+        with open(log_path, 'r') as f:
+            for line in f:
+                match = pattern.match(line.strip())
+                if match:
+                    events.append(match.groupdict())
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+        
+    return jsonify({
+        'session_id': session_id,
+        'events': events,
+        'video_url': f'/api/sessions/{session_id}/video'
+    })
+
+@app.route('/api/sessions/<session_id>/video')
+def get_session_video(session_id):
+    """Serve the combined monitoring video for a session"""
+    sessions_dir = os.path.join(os.getcwd(), "sessions")
+    video_path = os.path.join(sessions_dir, session_id, "combined_monitoring.mp4")
+    
+    if not os.path.exists(video_path):
+        return "Video not found", 404
+        
+    # conditional=True enables Range requests (seeking)
+    return send_file(video_path, mimetype='video/mp4', as_attachment=False, conditional=True)
 
 @app.route('/api/monitor/continuous/timer', methods=['POST'])
 def api_monitor_timer():

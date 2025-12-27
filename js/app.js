@@ -1,6 +1,7 @@
 import { initConfigMode } from './config.js';
 import { initMonitorMode } from './monitor.js';
 import { initVideoAnalysisMode, cleanupVideoAnalysis } from './video_analysis.js';
+import { initAnalysisMode } from './analysis.js';
 
 // Global App State
 window.appState = {
@@ -14,6 +15,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const btnStartConfig = document.getElementById('btn-start-config');
     const btnStartMonitor = document.getElementById('btn-start-monitor');
     const btnStartVideo = document.getElementById('btn-start-video-analysis');
+    const btnStartAnalysis = document.getElementById('btn-start-analysis');
 
     btnStartConfig.addEventListener('click', () => {
         navigateTo('config-view');
@@ -26,6 +28,12 @@ document.addEventListener('DOMContentLoaded', () => {
     if (btnStartVideo) {
         btnStartVideo.addEventListener('click', () => {
             navigateTo('video-analysis-view');
+        });
+    }
+
+    if (btnStartAnalysis) {
+        btnStartAnalysis.addEventListener('click', () => {
+            navigateTo('analysis-view');
         });
     }
 });
@@ -74,6 +82,9 @@ export function navigateTo(viewId) {
     } else if (viewId === 'video-analysis-view') {
         setCameraState(false);
         initVideoAnalysisMode(view);
+    } else if (viewId === 'analysis-view') {
+        setCameraState(false);
+        initAnalysisMode(view);
     } else {
         setCameraState(false);
     }
