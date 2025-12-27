@@ -110,6 +110,7 @@ class MonitorSystem:
         self.sess_log_path = None
         self.sess_video = None
         self.sess_start_time = 0
+        self.sess_last_record_time = 0
         self.sess_lock = threading.Lock()
         
         # Hardware Cache
@@ -137,6 +138,34 @@ class MonitorSystem:
         self.thread.start()
         print("[MonitorSystem] Background capture thread started")
 
+    def _resize_with_aspect(self, frame, target_size):
+        """Resizes a frame to fit target_size while preserving aspect ratio, using black padding."""
+        t_w, t_h = target_size
+        f_h, f_w = frame.shape[:2]
+        
+        # Calculate scaling factor
+        aspect_f = f_w / f_h
+        aspect_t = t_w / t_h
+        
+        if aspect_f > aspect_t:
+            # Width limited
+            new_w = t_w
+            new_h = int(t_w / aspect_f)
+        else:
+            # Height limited
+            new_h = t_h
+            new_w = int(t_h * aspect_f)
+            
+        resized = cv2.resize(frame, (new_w, new_h))
+        
+        # Create black canvas and center the resized frame
+        canvas = np.zeros((t_h, t_w, 3), dtype=np.uint8)
+        x_off = (t_w - new_w) // 2
+        y_off = (t_h - new_h) // 2
+        canvas[y_off:y_off+new_h, x_off:x_off+new_w] = resized
+        
+        return canvas
+
     def stop(self):
         self.run_flag = False
         if self.thread:
@@ -158,6 +187,7 @@ class MonitorSystem:
             
             self.sess_log_path = os.path.join(self.sess_path, "events.log")
             self.sess_start_time = time.time()
+            self.sess_last_record_time = self.sess_start_time
             
             self.log_event("SESSION_STARTED", f"Continuous monitoring started for session {self.sess_id}")
             print(f"[MonitorSystem] Started continuous monitor: {self.sess_path}")
@@ -213,8 +243,8 @@ class MonitorSystem:
         for i, frame in enumerate(display_frames):
             r = i // cols
             c = i % cols
-            # Resize to fit tile
-            resized = cv2.resize(frame, (t_w, t_h))
+            # Resize to fit tile while preserving aspect ratio
+            resized = self._resize_with_aspect(frame, (t_w, t_h))
             canvas[r*t_h:(r+1)*t_h, c*t_w:(c+1)*t_w] = resized
             
         return canvas
@@ -405,20 +435,31 @@ class MonitorSystem:
                                 ocr_text = metrics.get('ocr_match')
                                 self.log_event("OCR_MATCH", f"Negative text detected: {ocr_text}", display_name=d.get('name'))
 
-                # Handling recording in the loop
+                # Handling recording in the loop (Time-Based Synchronization)
                 if self.sess_id:
-                    tiled = self._get_tiled_frame()
-                    if tiled is not None:
-                        with self.sess_lock:
-                            if self.sess_video is None:
-                                h, w = tiled.shape[:2]
-                                v_path = os.path.join(self.sess_path, "combined_monitoring.mp4")
-                                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                                self.sess_video = cv2.VideoWriter(v_path, fourcc, 10.0, (w, h))
-                            
-                            # Write frame roughly every 100ms
-                            if frame_idx % 3 == 0: # Assuming ~30fps, write every 3rd frame for 10fps record
-                                self.sess_video.write(tiled)
+                    now = time.time()
+                    elapsed = now - self.sess_last_record_time
+                    interval = 0.1 # 10 FPS = 0.1s interval
+                    
+                    if elapsed >= interval:
+                        num_frames = int(elapsed / interval)
+                        tiled = self._get_tiled_frame()
+                        
+                        if tiled is not None:
+                            with self.sess_lock:
+                                if self.sess_video is None:
+                                    h, w = tiled.shape[:2]
+                                    v_path = os.path.join(self.sess_path, "combined_monitoring.mp4")
+                                    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                                    # Use a higher bitrate if possible, but standard is fine
+                                    self.sess_video = cv2.VideoWriter(v_path, fourcc, 10.0, (w, h))
+                                
+                                # Write frames to catch up to real time
+                                for _ in range(num_frames):
+                                    if self.sess_video:
+                                        self.sess_video.write(tiled)
+                                        
+                        self.sess_last_record_time += num_frames * interval
                 
                 # Faster capture loop (~30 FPS potential)
                 time.sleep(0.01)
