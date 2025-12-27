@@ -258,34 +258,31 @@ async function fetchCameras() {
 function autoFuzzyMatch() {
     console.log('Running auto-fuzzy matching pass...');
 
-    // Helper to normalize camera names by removing device suffix
     function normalizeCameraName(name) {
-        return name.replace(/\s*\(Device\s+\d+\)\s*$/i, '').trim().toLowerCase();
+        return name ? name.replace(/\s*\(Device\s+\d+\)\s*$/i, '').trim().toLowerCase() : '';
     }
 
     window.appState.displays.forEach(d => {
-        if (!d.camera_name) return; // Skip if no saved camera name
-
-        const savedBaseName = normalizeCameraName(d.camera_name);
-
         // Find matching camera: Priority 1 - Stable hardware_id, Priority 2 - Base name
         const match = window.appState.cameras.find(c => {
             if (d.hardware_id && c.hardware_id === d.hardware_id) return true;
-            const currentBaseName = normalizeCameraName(c.name);
-            return currentBaseName === savedBaseName;
+            if (d.camera_name) {
+                const savedBaseName = normalizeCameraName(d.camera_name);
+                const currentBaseName = normalizeCameraName(c.name);
+                return currentBaseName === savedBaseName;
+            }
+            return false;
         });
 
         if (match) {
-            // Update camId if it changed
-            if (d.camId !== match.id) {
-                console.log(`Auto-remapping display "${d.name}": "${d.camera_name}" -> Camera ID ${match.id} ("${match.name}")`);
-                d.camId = match.id;
-                // Also update the saved camera_name to match current naming
-                d.camera_name = match.name;
-            }
+            console.log(`Matched display "${d.name}" to Camera ${match.id} ("${match.name}")`);
+            d.camId = match.id;
+            d.hardware_id = match.hardware_id;
+            d.camera_name = match.name;
         } else {
-            // Camera not found - log warning
-            console.warn(`Display "${d.name}" configured for camera "${d.camera_name}" but camera not found.`);
+            console.warn(`Display "${d.name}" camera not found. Marking as MISSING.`);
+            // DO NOT leave old camId, as it might collide with a re-indexed camera!
+            d.camId = 'MISSING_' + (d.hardware_id || d.camera_name || d.id);
         }
     });
 }
@@ -647,7 +644,7 @@ function renderOverlays() {
     const oy = mediaRect.top - rect.top;
     const scale = mediaRect.width / (target.videoWidth || target.naturalWidth || target.width || 1);
 
-    window.appState.displays.filter(d => d.camId === window.appState.selectedCameraId).forEach(d => {
+    window.appState.displays.filter(d => d.hardware_id === window.appState.selectedCameraId).forEach(d => {
         // Safe corners for rendering
         const corners = d.corners || [
             { x: d.x, y: d.y },
@@ -793,43 +790,35 @@ function bindEvents() {
     });
 }
 
-window.selectCamera = function (id) {
-    if (!id) return;
+window.selectCamera = function (hwId) {
+    if (!hwId) return;
 
-    // Check if we need fuzzy matching (saved ID hash might have changed)
-    let cam = window.appState.cameras.find(c => c.id === id);
+    // Primarily find by hardware_id
+    let cam = window.appState.cameras.find(c => c.hardware_id === hwId);
 
+    // Fallback search if hwId itself is an index (for legacy/internal calls)
     if (!cam) {
-        // Try fuzzy match by name if this ID came from a saved display
-        const savedDisplayWithId = window.appState.displays.find(d => d.camId === id);
-        if (savedDisplayWithId && savedDisplayWithId.camera_name) {
-            cam = window.appState.cameras.find(c => c.name.trim() === savedDisplayWithId.camera_name.trim());
-            if (cam) {
-                console.log(`Fuzzy matched camera "${cam.name}" by name. Updating display camId.`);
-                // Update all displays using this old ID to the new session ID
-                window.appState.displays.forEach(d => {
-                    if (d.camId === id) d.camId = cam.id;
-                });
-                id = cam.id;
-            }
-        }
+        cam = window.appState.cameras.find(c => c.id === hwId);
     }
 
-    window.appState.selectedCameraId = id;
-
     if (!cam) {
-        console.warn('Camera not located in current session:', id);
-        // Refresh UI even if cam is missing to show "selection border"
+        console.warn('Camera not located in current session:', hwId);
+        window.appState.selectedCameraId = hwId; // Still track it as selection
+
         renderOverlays();
         renderDisplayList();
 
         const msg = document.getElementById('placeholder-msg');
         if (msg) {
-            msg.innerText = 'Camera connection lost for this display. Please select an available camera from the left.';
+            msg.innerText = 'Camera connection lost or not found. Please select an available camera.';
             msg.style.display = 'block';
         }
+        stopActiveStream();
         return;
     }
+
+    // Now track by stable hardware_id
+    window.appState.selectedCameraId = cam.hardware_id || cam.id;
 
     // Highlight selected camera in sidebar
     document.querySelectorAll('.camera-list .list-item').forEach(el => {
@@ -893,10 +882,13 @@ function startAddDisplayMode() {
         return;
     }
     const id = 'disp_' + Date.now();
+    const cam = window.appState.cameras.find(c => c.hardware_id === window.appState.selectedCameraId);
     const newD = {
         id,
         name: 'New Display',
-        camId: window.appState.selectedCameraId,
+        camId: cam ? cam.id : window.appState.selectedCameraId,
+        hardware_id: window.appState.selectedCameraId,
+        camera_name: cam ? cam.name : 'Unknown Camera',
         x: 100, y: 100, w: 300, h: 180,
         rotation: 0,
         enablePerspective: false,
@@ -920,6 +912,7 @@ function renderDisplayList() {
         // Find if the configured camera (by name) is currently available
         const configuredCameraName = d.camera_name || 'Unknown Camera';
         const isCameraConnected = window.appState.cameras.some(c => {
+            if (d.hardware_id && c.hardware_id === d.hardware_id) return true;
             // Fuzzy match: check if camera names are similar
             const cLower = c.name.toLowerCase();
             const dLower = configuredCameraName.toLowerCase();
@@ -953,8 +946,9 @@ window.selectDisplayFromList = function (id) {
     activeDisplayId = id;
 
     // Switch camera if it exists and is different
-    if (d.camId !== window.appState.selectedCameraId) {
-        window.selectCamera(d.camId);
+    const dHwId = d.hardware_id || d.camId;
+    if (dHwId !== window.appState.selectedCameraId) {
+        window.selectCamera(dHwId);
     } else {
         renderOverlays();
         renderDisplayList(); // Ensure sidebar selection reflects
@@ -973,7 +967,11 @@ function openPropertyPanel(d) {
 }
 
 function renderCameraList() {
-    document.getElementById('camera-list').innerHTML = window.appState.cameras.map(c => `<div class="list-item" onclick="selectCamera('${c.id}')"><div style="font-weight:500;">${c.name}</div></div>`).join('');
+    document.getElementById('camera-list').innerHTML = window.appState.cameras.map(c =>
+        `<div class="list-item" onclick="selectCamera('${c.hardware_id || c.id}')">
+            <div style="font-weight:500;">${c.name}</div>
+        </div>`
+    ).join('');
 }
 
 function applyZoom(val) {
