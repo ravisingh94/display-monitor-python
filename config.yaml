@@ -1,7 +1,7 @@
 config:
   off_brightness: 5
   black_brightness: 15
-  noise_variance: 2
+  noise_variance: 4
   content_variance: 30
   diff_threshold: 0.5
   edge_threshold: 1.2
