@@ -5,6 +5,9 @@ from datetime import datetime
 import argparse
 import os
 import sys
+import logging
+
+logger = logging.getLogger('glitch_logic')
 
 class GlitchDetector:
     """
@@ -162,12 +165,19 @@ class GlitchDetector:
             freeze_duration=self.consecutive_freeze_frames,
             noise_variance=noise_variance
         )
+        
+        glitch_types = self._glitch_types(glitch_signals, visual_artifact or persistent_visual_anomaly)
+        
+        # Log glitch detection
+        if is_start:
+            logger.warning(f"GLITCH DETECTED - Type: {', '.join(glitch_types)}, Severity: {severity}")
+        logger.debug(f"Glitch active - Types: {glitch_types}, Diff: {diff_score:.2f}, Noise: {noise_variance:.1f}")
 
         return {
             "glitch": True,
             "is_start": is_start,
             "severity": severity,
-            "type": self._glitch_types(glitch_signals, visual_artifact or persistent_visual_anomaly),
+            "type": glitch_types,
             "metrics": {
                 "diff": float(diff_score),
                 "area": float(area_ratio),
@@ -282,7 +292,7 @@ class GlitchDetector:
 def process_video_second_wise(video_path, config):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
-        print(f"Error: Could not open video file {video_path}")
+        logger.debug(f"Error: Could not open video file {video_path}")
         return None
     fps = cap.get(cv2.CAP_PROP_FPS)
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -308,9 +318,9 @@ def process_video_second_wise(video_path, config):
                 second_wise_severity[second] = result["severity"]
         frame_idx += 1
         if frame_idx % 100 == 0:
-            print(f"Processed {frame_idx}/{frame_count} frames...", end='\r')
+            logger.debug(f"Processed {frame_idx}/{frame_count} frames...", end='\r')
     cap.release()
-    print("\nProcessing complete.")
+    logger.debug("\nProcessing complete.")
     return second_wise_glitches, second_wise_severity
 
 def main():

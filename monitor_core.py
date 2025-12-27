@@ -5,6 +5,9 @@ import os
 import json
 import time
 import threading
+import logging
+
+logger = logging.getLogger('monitor_core')
 from glitch_logic import GlitchDetector
 
 class DisplayStatusEngine:
@@ -67,15 +70,24 @@ class DisplayStatusEngine:
                 return pattern
         return None
 
-    def _ocr_worker(self, frame):
+    def _ocr_worker(self, frame, display_name=None, camera_id=None):
         """Internal worker to run OCR without blocking main loop"""
-        res = self.run_ocr_core(frame)
+        res = self.run_ocr_core(frame, display_name, camera_id)
         with self.ocr_lock:
             self.last_ocr_result = res
 
-    def run_ocr_core(self, frame):
+    def run_ocr_core(self, frame, display_name=None, camera_id=None):
         if not self.ocr_reader:
             return None
+        
+        # Build context string for logging
+        context = ""
+        if display_name and camera_id:
+            context = f"[Display: {display_name}, Camera: {camera_id}] "
+        elif display_name:
+            context = f"[Display: {display_name}] "
+        elif camera_id:
+            context = f"[Camera: {camera_id}] "
         
         try:
             # EasyOCR performs better with RGB
@@ -84,7 +96,7 @@ class DisplayStatusEngine:
             # reader.readtext(...) returns list of (bbox, text, prob)
             results = self.ocr_reader.readtext(rgb_frame)
         except Exception as e:
-             print(f"[OCR Debug] Error in readtext: {e}")
+             logger.error(f"{context}OCR error during readtext: {e}")
              return None
 
         detected = False
@@ -100,21 +112,26 @@ class DisplayStatusEngine:
                 if match:
                     detected = True
                     pattern_found = match
-                    print(f"[OCR Debug] Pattern MATCHED: '{match}' in text: '{text}' (prob: {prob:.2f})")
+                    logger.warning(f"{context}OCR NEGATIVE PATTERN MATCHED: '{match}' in '{text}' (confidence: {prob:.2f})")
                 else:
-                    print(f"[OCR Debug] Detected text: '{text}' (prob: {prob:.2f})")
+                    logger.debug(f"{context}OCR text detected: '{text}' (confidence: {prob:.2f})")
         
         if not found_any and len(results) > 0:
-            # Log low confidence results for debugging
+            logger.debug(f"{context}OCR: {len(results)} results with low confidence (<0.3) - discarded")
             for (bbox, text, prob) in results:
                 print(f"[OCR Debug] LOW CONFIDENCE: '{text}' (prob: {prob:.2f})")
+        
+        # Log summary if any text was found
+        if text_found.strip():
+            logger.debug(f"{context}OCR full text: '{text_found.strip()}'")
 
         return {
             'detected': detected,
             'text': text_found.strip(),
             'pattern': pattern_found
         }
-    def evaluate(self, frame):
+    
+    def evaluate(self, frame, display_name=None, camera_id=None):
         """
         Evaluates a BGR frame and returns (status, metrics)
         """
@@ -186,7 +203,7 @@ class DisplayStatusEngine:
         if should_run_ocr and (now - self.last_ocr_time) > self.ocr_interval:
         # Start async OCR if not currently running
             if self.ocr_thread is None or not self.ocr_thread.is_alive():
-                self.ocr_thread = threading.Thread(target=self._ocr_worker, args=(frame.copy(),))
+                self.ocr_thread = threading.Thread(target=self._ocr_worker, args=(frame.copy(), display_name, camera_id))
                 self.ocr_thread.start()
                 self.last_ocr_time = now
         
@@ -220,7 +237,7 @@ class CLILoader:
     def load_config(self):
         self.displays = self._load_displays()
         self.monitor_config = self._load_monitor_config()
-        print(f"[CLILoader] Loaded {len(self.displays)} displays from {self.display_config_path}")
+        logger.debug(f"[CLILoader] Loaded {len(self.displays)} displays from {self.display_config_path}")
 
     def _load_displays(self):
         if not os.path.exists(self.display_config_path):
@@ -268,12 +285,12 @@ class CLILoader:
             if isinstance(ocr_cfg, dict):
                 config.update(ocr_cfg)
                 if 'mode' in ocr_cfg:
-                    print(f"[CLILoader] OCR Mode set to: {ocr_cfg['mode']} (Interval: {ocr_cfg.get('interval', 5.0)}s)")
+                    logger.debug(f"[CLILoader] OCR Mode set to: {ocr_cfg['mode']} (Interval: {ocr_cfg.get('interval', 5.0)}s)")
             
             # Load negative_text patterns
             config['negative_text'] = data.get('negative_text', [])
             if config['negative_text']:
-                print(f"[CLILoader] Loaded {len(config['negative_text'])} negative text patterns.")
+                logger.debug(f"[CLILoader] Loaded {len(config['negative_text'])} negative text patterns.")
             
             return config
 
@@ -307,7 +324,7 @@ class ImageProcessor:
             # Browser hashes are usually long hex strings without paths
             if isinstance(idx, str) and not (os.path.sep in idx or idx.startswith(('rtsp://', 'http://'))):
                 if len(idx) > 32:
-                    print(f"[ImageProcessor] Skipping browser-side ID hash: {idx[:8]}...")
+                    logger.debug(f"[ImageProcessor] Skipping browser-side ID hash: {idx[:8]}...")
                     self._failed_caps[cam_id] = time.time()
                     return None
                     
@@ -330,10 +347,10 @@ class ImageProcessor:
                         return cap
                     time.sleep(0.05)
                 
-                print(f"[ImageProcessor] Camera {idx} ({desc}) failed warmup.")
+                logger.debug(f"[ImageProcessor] Camera {idx} ({desc}) failed warmup.")
                 cap.release()
             except Exception as e:
-                print(f"[ImageProcessor] Error in {desc} attempt for {idx}: {e}")
+                logger.debug(f"[ImageProcessor] Error in {desc} attempt for {idx}: {e}")
             return None
 
         # Attempt 1: Default (OS decides)
@@ -357,10 +374,10 @@ class ImageProcessor:
         if cap:
             self.caps[cam_id] = cap
             if cam_id in self._failed_caps: self._failed_caps.pop(cam_id, None)
-            print(f"[ImageProcessor] Successfully opened camera {cam_id} via {cap.get(cv2.CAP_PROP_FRAME_WIDTH)}x{cap.get(cv2.CAP_PROP_FRAME_HEIGHT)}")
+            logger.debug(f"[ImageProcessor] Successfully opened camera {cam_id} via {cap.get(cv2.CAP_PROP_FRAME_WIDTH)}x{cap.get(cv2.CAP_PROP_FRAME_HEIGHT)}")
             return cap
         
-        print(f"[ImageProcessor] Failed to open camera: {idx} after all attempts.")
+        logger.debug(f"[ImageProcessor] Failed to open camera: {idx} after all attempts.")
         self._failed_caps[cam_id] = time.time()
         return None
 
@@ -380,7 +397,7 @@ class ImageProcessor:
                 for item in items:
                     real_names.append(item.get('_name', 'Unknown Camera'))
         except Exception as e:
-            print(f"[Discovery] System Profiler failed: {e}")
+            logger.debug(f"[Discovery] System Profiler failed: {e}")
 
         available_cameras = []
         
@@ -405,13 +422,14 @@ class ImageProcessor:
                     else:
                         name = f"Camera Device {i}"
                         
-                    print(f"[Discovery] Found camera {i}: {name}")
+                    logger.info(f"Camera discovered - Index: {i}, Name: {name}")
                     available_cameras.append({'id': str(i), 'name': name, 'type': 'stream'})
             except Exception as e:
-                print(f"[Discovery] Error checking camera {i}: {e}")
+                logger.error(f"Error discovering camera {i}: {e}")
             finally:
                 if cap: cap.release()
                 
+        logger.info(f"Camera discovery complete - Found {len(available_cameras)} camera(s)")
         return available_cameras
 
     def read_frame(self, cam_id):
@@ -430,7 +448,7 @@ class ImageProcessor:
                 time.sleep(0.01)
 
             # If we get here, we failed 3 times in a row
-            print(f"[ImageProcessor] Failed to read frame from {cam_id} (3 retries). Releasing...")
+            logger.debug(f"[ImageProcessor] Failed to read frame from {cam_id} (3 retries). Releasing...")
             cap.release()
             if cam_id in self.caps:
                 del self.caps[cam_id]
@@ -503,7 +521,7 @@ class ImageProcessor:
             src_w = 1280.0
             
         if os.environ.get('DEBUG_MONITOR'):
-            print(f"DEBUG: Mapping {ref_x}x{ref_y} space to {fw}x{fh} frame. Assumed source: {src_w}x{src_h}")
+            logger.debug(f"DEBUG: Mapping {ref_x}x{ref_y} space to {fw}x{fh} frame. Assumed source: {src_w}x{src_h}")
             
         # Calculate uniform scale based on height matching
         # Most cameras/browsers match the height and crop or pillarbox the sides.

@@ -20,6 +20,47 @@ else:
 
 from monitor_core import CLILoader, ImageProcessor, DisplayStatusEngine
 from glitch_logic import process_video_second_wise
+import logging
+import logging.handlers
+
+# --- Logging Setup ---
+def setup_logging(config):
+    """Configure file-based logging from config"""
+    log_config = config.get('logging', {})
+    if not log_config.get('enabled', False):
+        # Logging disabled, configure minimal console logging
+        logging.basicConfig(level=logging.WARNING, format='%(levelname)s: %(message)s')
+        return
+    
+    # Create logs directory
+    log_file = log_config.get('file', 'logs/monitor.log')
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    
+    # Configure rotating file handler
+    file_handler = logging.handlers.RotatingFileHandler(
+        log_file,
+        maxBytes=log_config.get('max_bytes', 10*1024*1024),
+        backupCount=log_config.get('backup_count', 5)
+    )
+    
+    # Console handler for INFO and above
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    
+    # Set format
+    log_format = log_config.get('format', '%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    formatter = logging.Formatter(log_format)
+    file_handler.setFormatter(formatter)
+    console_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+    
+    # Configure root logger
+    logger = logging.getLogger()
+    log_level = log_config.get('level', 'INFO').upper()
+    logger.setLevel(getattr(logging, log_level, logging.INFO))
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
+    
+    logger.info(f"Logging initialized - Level: {log_level}, File: {log_file}")
 
 app = Flask(__name__, static_folder='.')
 UPLOAD_FOLDER = os.path.join(os.getcwd(), 'uploads')
@@ -94,6 +135,7 @@ class MonitorSystem:
 
     def _capture_loop(self):
         import re
+        logger = logging.getLogger('MonitorSystem')
 
         def normalize_name(n):
             # Remove (Device X) suffix to compare base names
@@ -101,67 +143,71 @@ class MonitorSystem:
             return base
 
         # Reconcile cameras once at startup
-        print("[MonitorSystem] ===== CAMERA RECONCILIATION START =====")
+        logger.info("=" * 50)
+        logger.info("CAMERA RECONCILIATION START")
+        logger.info("=" * 50)
+        
         current_cams = self.processor.discover_cameras()
         cams_by_norm = {}
         for c in current_cams:
             norm = normalize_name(c['name'])
             cams_by_norm[norm] = c
-            print(f"[MonitorSystem] Detected: ID={c['id']}, Name='{c['name']}', Normalized='{norm}'")
+            logger.debug(f"Detected: ID={c['id']}, Name='{c['name']}', Normalized='{norm}'")
         
-        print(f"[MonitorSystem] Total cameras detected: {len(current_cams)}")
-        print(f"[MonitorSystem] Display count: {len(self.loader.displays)}")
+        logger.info(f"Total cameras detected: {len(current_cams)}")
+        logger.info(f"Display count: {len(self.loader.displays)}")
         
         for d in self.loader.displays:
             saved_full_name = d.get('camera_name')
             current_cam_id = d.get('camId')
-            print(f"\n[MonitorSystem] Processing display '{d.get('name')}':")
-            print(f"  - Configured camera_name: '{saved_full_name}'")
-            print(f"  - Current camId: {current_cam_id}")
+            logger.debug(f"Processing display '{d.get('name')}':")
+            logger.debug(f"  - Configured camera_name: '{saved_full_name}'")
+            logger.debug(f"  - Current camId: {current_cam_id}")
             
             if saved_full_name:
                 saved_norm = normalize_name(saved_full_name)
-                print(f"  - Normalized config name: '{saved_norm}'")
+                logger.debug(f"  - Normalized config name: '{saved_norm}'")
                 matched_cam = None
                 
                 # Exact match
                 if saved_norm in cams_by_norm:
                     matched_cam = cams_by_norm[saved_norm]
-                    print(f"  - EXACT MATCH found!")
+                    logger.debug(f"  - EXACT MATCH found!")
                 
                 # Fuzzy match
                 if not matched_cam:
                     for c_norm, c_obj in cams_by_norm.items():
                         if saved_norm in c_norm or c_norm in saved_norm:
                             matched_cam = c_obj
-                            print(f"  - FUZZY MATCH found: '{c_norm}' <-> '{saved_norm}'")
+                            logger.debug(f"  - FUZZY MATCH found: '{c_norm}' <-> '{saved_norm}'")
                             break
                         if "macbook" in saved_norm and "macbook" in c_norm:
                             matched_cam = c_obj
-                            print(f"  - KEYWORD MATCH (macbook): '{c_norm}' <-> '{saved_norm}'")
+                            logger.debug(f"  - KEYWORD MATCH (macbook): '{c_norm}' <-> '{saved_norm}'")
                             break
                         if "webcam" in saved_norm and "webcam" in c_norm:
                             matched_cam = c_obj
-                            print(f"  - KEYWORD MATCH (webcam): '{c_norm}' <-> '{saved_norm}'")
+                            logger.debug(f"  - KEYWORD MATCH (webcam): '{c_norm}' <-> '{saved_norm}'")
                             break
                 
                 if matched_cam:
                     new_id = matched_cam['id']
-                    print(f"  - Matched camera ID: {new_id} ('{matched_cam['name']}')")
+                    logger.debug(f"  - Matched camera ID: {new_id} ('{matched_cam['name']}')")
                     if d.get('camId') != new_id:
-                        print(f"  - *** REMAPPING: {current_cam_id} -> {new_id} ***")
+                        logger.info(f"REMAPPING: Display '{d.get('name')}' from Camera {current_cam_id} -> {new_id} ({matched_cam['name']})")
                         d['camId'] = new_id
                     else:
-                        print(f"  - Already correct, no remapping needed")
+                        logger.debug(f"  - Already correct, no remapping needed")
                     d['missing_camera'] = False
                 else:
-                    print(f"  - *** NO MATCH FOUND - MARKING OFFLINE ***")
+                    logger.warning(f"Camera '{saved_full_name}' NOT FOUND for display '{d.get('name')}'. Marking offline.")
                     d['missing_camera'] = True
             else:
-                print(f"  - No camera_name configured, skipping")
+                logger.debug(f"  - No camera_name configured for display '{d.get('name')}', skipping")
                 d['missing_camera'] = False
         
-        print("[MonitorSystem] ===== CAMERA RECONCILIATION COMPLETE =====\n")
+        logger.info("CAMERA RECONCILIATION COMPLETE")
+        logger.info("=" * 50)
 
         frame_idx = 0
         while self.run_flag:
@@ -227,7 +273,7 @@ class MonitorSystem:
                                  self.engines[did] = DisplayStatusEngine(engine_config)
                             
                             engine = self.engines[did]
-                            status, metrics = engine.evaluate(disp_frame)
+                            status, metrics = engine.evaluate(disp_frame, display_name=d.get('name'), camera_id=str(cid))
                             
                         except Exception as inner_e:
                              print(f"[MonitorDebug] Error processing display {did}: {inner_e}")
@@ -805,4 +851,15 @@ def stream_analysis(session_id):
     return Response(generate(), mimetype='text/event-stream')
 
 if __name__ == '__main__':
+    # Initialize logging
+    import yaml
+    with open('config.yaml', 'r') as f:
+        config = yaml.safe_load(f)
+    setup_logging(config)
+    
+    logger = logging.getLogger(__name__)
+    logger.info("=" * 60)
+    logger.info("Display Monitor Application Starting")
+    logger.info("=" * 60)
+    
     app.run(host='0.0.0.0', port=5001, debug=True)

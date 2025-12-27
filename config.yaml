@@ -30,6 +30,14 @@ ocr_config:
   mode: "ALWAYS"      # Options: ALWAYS, BLACK, FREEZE, ACTIVE (Live)
   interval: 1.0       # Seconds between OCR checks
 
+logging:
+  enabled: true                # Enable/disable file logging
+  level: "DEBUG"                 # DEBUG, INFO, WARNING, ERROR, CRITICAL  
+  file: "logs/monitor.log"     # Log file path
+  max_bytes: 10485760          # 10MB max file size
+  backup_count: 5              # Keep 5 backup files
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
 negative_text:
   - "No Video Signal"
   - "No Display"
