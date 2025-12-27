@@ -98,6 +98,83 @@ negative_text:
 | `frozen_frames` | 60 | Frames to wait (~2s) before marking FROZEN. |
 | `ocr_interval` | 5.0 | Seconds between OCR scans to save processing. |
 
+### UI Metrics Explained
+
+When monitoring displays, you'll see real-time metrics below each display card:
+
+- **L** (Luminance): Average brightness (0-255). Indicates overall screen brightness.
+- **V** (Variance): Pixel variation measure. High values indicate textured/detailed content, low values indicate flat/uniform screens.
+- **Diff** (Difference): Frame-to-frame pixel change. Near 0 when static, increases with motion.
+- **Frz** (Freeze Counter): Consecutive static frames detected. Increments when Diff < threshold, resets on motion. When this reaches `frozen_frames`, status changes to FROZEN.
+
+### Configuration Parameters Detailed
+
+#### **off_brightness: 5**
+- **What it is**: Average brightness threshold (0-255 scale)
+- **Significance**: If the display's average brightness is below 5, it's considered completely **OFF** (powered down)
+- **Impact**: Very strict - only near-black screens (< 2% brightness) are marked as OFF
+- **Adjust if**: Getting false OFF detections on very dark scenes → increase to 8-10
+
+#### **black_brightness: 15**
+- **What it is**: Threshold for backlight-on but no content
+- **Significance**: Brightness between 5-15 means the display is on, but showing a black screen (no signal/content)
+- **Impact**: Distinguishes between "OFF" (no power) and "BLACK" (powered but no content)
+- **Adjust if**: Dark content is being flagged as BLACK → increase to 20-25
+
+#### **noise_variance: 2**
+- **What it is**: Pixel variance threshold for sensor noise
+- **Significance**: Variance below 2 indicates uniform/flat pixels (no texture)
+- **Impact**: Used with brightness to distinguish OFF/BLACK from very dark content
+- **Adjust if**: Rarely needs changing (sensor noise baseline)
+
+#### **content_variance: 30**
+- **What it is**: Minimum variance for "interesting" content
+- **Significance**: If variance > 30, the display has texture/detail (not just flat colors)
+- **Impact**: Helps classify ACTIVE vs UNKNOWN status
+- **Adjust if**: Static backgrounds are being marked UNKNOWN → lower to 15-20
+
+#### **diff_threshold: 0.5**
+- **What it is**: Mean pixel difference between consecutive frames
+- **Significance**: If difference < 0.5, the frame is considered "static" (no motion)
+- **Impact**: **Critical for freeze detection** - lower = more sensitive
+- **Adjust if**:
+  - Not detecting freezes → **increase to 1.0-2.0** (less strict)
+  - False freeze alarms → **decrease to 0.2-0.3** (more strict)
+
+#### **edge_threshold: 1.2**
+- **What it is**: Percentage of pixels with high-frequency edges
+- **Significance**: Edge density > 1.2% means the display has sharp details/text
+- **Impact**: Helps distinguish content-rich frames from flat ones
+- **Adjust if**: Simple UIs are being marked UNKNOWN → lower to 0.8
+
+#### **frozen_frames: 5**
+- **What it is**: Number of consecutive static frames before declaring FROZEN
+- **Significance**: Balance between responsiveness and false positives. Lower = faster detection
+- **Impact**: With typical sampling rates, determines how quickly freezes are detected
+- **Adjust if**:
+  - Too many false freezes → increase to 10-30
+  - Freezes not detected fast enough → decrease to 3-5
+
+## 🏗 Implementation Details
+
+### Perspective Correction Engine
+The monitoring system uses a **Bilinear Grid Interpolation** method to approximate 3D perspective transformations (homography) using the 2D Canvas API:
+- **Subdivision**: Instead of rendering as two large triangles, each display region is subdivided into a **4x4 grid (16 cells / 32 triangles)**.
+- **Seam-Prevention**: A 0.5px sub-pixel expansion is applied to each triangle to prevent rendering gaps usually caused by browser rounding.
+- **Performance**: Optimized to run at 60 FPS by calculating the transformation matrix once and applying it per-frame using the `transform()` API.
+
+### Display Status Engine (DSE)
+The system performs autonomous health monitoring using pixel-level analysis:
+1.  **Preprocessing**: Frames are sampled at 6 FPS and converted to a luminance-weighted grayscale mapping.
+2.  **Luminance & Variance**: Calculates the mean brightness and statistical variance to detect power states.
+3.  **Edge Density**: Uses a Sobel-based high-frequency filter to detect "meaningful" content vs. flat signals.
+4.  **Temporal Difference**: Tracks frame-to-frame pixel delta to detect system freezes.
+5.  **States**:
+    - **OFF**: Low brightness AND low variance AND low edge density.
+    - **BLACK**: Moderate brightness (backlight) AND low variance.
+    - **FROZEN**: High variance (content) AND Zero temporal movement for >1 second.
+    - **ACTIVE**: High variance AND detected motion.
+    
 ## Troubleshooting
 
 - **Camera Not Found**: If hardware IDs change, the system uses "Fuzzy Matching" on camera names. Ensure your `display_config.yaml` has the correct `camera_name`.
