@@ -93,12 +93,85 @@ class MonitorSystem:
         self.processor.close()
 
     def _capture_loop(self):
+        # 1. Initial Camera Reconciliation
+        # Ensure we map displays to the CORRECT hardware ID based on name, 
+        # avoiding the "Index 0 is now MacBook" issue when HP (Index 0) is unplugged.
+        import re
+
+        def normalize_name(n):
+            # Remove (Device X) suffix to compare base names
+            base = re.sub(r'\s*\(Device \d+\)$', '', n, flags=re.IGNORECASE).strip().lower()
+            return base
+
+        print("[MonitorSystem] Reconciling camera mappings...")
+        current_cams = self.processor.discover_cameras() # Uses system_profiler
+        
+        # Build lookup map
+        cams_by_norm = {}
+        for c in current_cams:
+            norm = normalize_name(c['name']) # e.g. "macbook pro camera"
+            cams_by_norm[norm] = c
+            
+        print(f"[MonitorSystem] Detected Cameras (Normalized): {list(cams_by_norm.keys())}")
+        
+        for d in self.loader.displays:
+            saved_full_name = d.get('camera_name')
+            if saved_full_name:
+                saved_norm = normalize_name(saved_full_name) # e.g. "macbook camera"
+                matched_cam = None
+                
+                # 1. Try exact normalized match
+                if saved_norm in cams_by_norm:
+                    matched_cam = cams_by_norm[saved_norm]
+                
+                # 2. Try partial/fuzzy match
+                if not matched_cam:
+                    for c_norm, c_obj in cams_by_norm.items():
+                        # "macbook camera" in "macbook pro camera" or vice versa
+                        if saved_norm in c_norm or c_norm in saved_norm:
+                            matched_cam = c_obj
+                            break
+                        
+                        # Specific keyword fallbacks
+                        if "macbook" in saved_norm and "macbook" in c_norm:
+                             matched_cam = c_obj
+                             break
+                        if "webcam" in saved_norm and "webcam" in c_norm: # Common for external
+                             matched_cam = c_obj
+                             break
+                             
+                if matched_cam:
+                     new_id = matched_cam['id']
+                     if d.get('camId') != new_id:
+                         print(f"[MonitorSystem] Remapping display '{d.get('name')}' from {d.get('camId')} to {new_id} ({matched_cam['name']})")
+                         d['camId'] = new_id
+                     d['missing_camera'] = False
+                else:
+                    # Name not found. 
+                    print(f"[MonitorSystem] Camera '{saved_full_name}' (norm: {saved_norm}) NOT FOUND. Marking offline.")
+                    d['missing_camera'] = True
+            else:
+                 d['missing_camera'] = False
+
         frame_idx = 0
         while self.run_flag:
             try:
                 # Group displays by camera to optimize capture
                 cam_displays = {}
                 for d in self.loader.displays:
+                    if d.get('missing_camera', False):
+                        # Force status update to NO SIGNAL for missing cams
+                        with self.lock:
+                             self.latest_status[d['id']] = {
+                                'id': d['id'],
+                                'name': d.get('name', d['id']),
+                                'camId': d.get('camId', '?'),
+                                'timestamp': time.time() * 1000,
+                                'status': 'OFFLINE',
+                                'metrics': {'error': 'Camera Disconnected'}
+                             }
+                        continue
+
                     cid = d.get('camId', 0)
                     if cid not in cam_displays: cam_displays[cid] = []
                     cam_displays[cid].append(d)
@@ -108,7 +181,25 @@ class MonitorSystem:
                 for cid in cids:
                     displays = cam_displays[cid]
                     frame = self.processor.read_frame(cid)
+                    
+                    # Debug log every 500 frames (~5s)
+                    if frame_idx % 500 == 0:
+                         status_str = "OK" if frame is not None else "FAIL"
+                         print(f"[CaptureLoop] Cam {cid}: {status_str} | Displays: {len(displays)}")
+
                     if frame is None:
+                        # Camera offline/failed
+                        with self.lock:
+                            for d in displays:
+                                self.latest_status[d['id']] = {
+                                    'id': d['id'],
+                                    'name': d.get('name', d['id']),
+                                    'camId': d.get('camId', cid),
+                                    'camera_name': d.get('camera_name', f"Camera {cid}"),
+                                    'timestamp': time.time() * 1000,
+                                    'status': 'NO_SIGNAL',
+                                    'metrics': {'error': 'Camera Disconnected'}
+                                }
                         continue
                         
                     for d in displays:
@@ -286,7 +377,18 @@ def save_config():
 @app.route('/api/cameras')
 def get_cameras():
     """Returns cameras detected on the host machine"""
+    # Optional: Release monitor_sys cameras momentarily to ensure discovery works?
+    # monitor_sys.processor.close() # Might disrupt dashboard
     return jsonify(ImageProcessor.discover_cameras())
+
+@app.route('/api/cameras/reset', methods=['POST'])
+def reset_cameras():
+    print("[API] Resetting camera connections...")
+    with monitor_sys.lock:
+        monitor_sys.processor.close()
+        monitor_sys.latest_frames.clear()
+        monitor_sys.latest_status.clear()
+    return jsonify({'status': 'reset'})
 
 
 @app.route('/api/monitor/config')

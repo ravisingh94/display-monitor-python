@@ -280,14 +280,20 @@ class CLILoader:
 class ImageProcessor:
     def __init__(self):
         self.caps = {}
-        self._failed_caps = set()
+        self._failed_caps = {} # Map ID -> timestamp of last failure
 
     def get_cap(self, cam_id):
         if cam_id in self.caps:
             return self.caps[cam_id]
         
+        # Cooldown check (5 seconds)
         if cam_id in self._failed_caps:
-            return None
+            last_fail = self._failed_caps[cam_id]
+            if time.time() - last_fail < 5.0:
+                return None
+            else:
+                # Retry time!
+                del self._failed_caps[cam_id]
         
         # Determine index or path
         try:
@@ -302,38 +308,111 @@ class ImageProcessor:
             if isinstance(idx, str) and not (os.path.sep in idx or idx.startswith(('rtsp://', 'http://'))):
                 if len(idx) > 32:
                     print(f"[ImageProcessor] Skipping browser-side ID hash: {idx[:8]}...")
-                    self._failed_caps.add(cam_id)
+                    self._failed_caps[cam_id] = time.time()
                     return None
-
+                    
         # print(f"[ImageProcessor] Opening camera: {idx}")
-        cap = cv2.VideoCapture(idx)
-        if cap.isOpened():
-            # Explicitly set resolution to a common stable format
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        # print(f"[ImageProcessor] Opening camera: {idx}")
+        
+        def _try_open(config_func=None, desc="Default"):
+            try:
+                cap = cv2.VideoCapture(idx)
+                if not cap.isOpened():
+                    return None
+                
+                if config_func:
+                    config_func(cap)
+                
+                # Warmup
+                for _ in range(5):
+                    ret, _ = cap.read()
+                    if ret:
+                        return cap
+                    time.sleep(0.05)
+                
+                print(f"[ImageProcessor] Camera {idx} ({desc}) failed warmup.")
+                cap.release()
+            except Exception as e:
+                print(f"[ImageProcessor] Error in {desc} attempt for {idx}: {e}")
+            return None
+
+        # Attempt 1: Default (OS decides)
+        cap = _try_open(desc="Attempt 1: Default")
+        
+        # Attempt 2: Force MJPEG @ 720p (Good for bandwidth)
+        if not cap:
+            def config_mjpeg_720(c):
+                c.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                c.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                c.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            cap = _try_open(config_mjpeg_720, desc="Attempt 2: MJPEG 720p")
+
+        # Attempt 3: Low Res fallback (640x480)
+        if not cap:
+            def config_low_res(c):
+                c.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                c.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+            cap = _try_open(config_low_res, desc="Attempt 3: 640x480")
+
+        if cap:
             self.caps[cam_id] = cap
-            if cam_id in self._failed_caps: self._failed_caps.remove(cam_id)
+            if cam_id in self._failed_caps: self._failed_caps.pop(cam_id, None)
+            print(f"[ImageProcessor] Successfully opened camera {cam_id} via {cap.get(cv2.CAP_PROP_FRAME_WIDTH)}x{cap.get(cv2.CAP_PROP_FRAME_HEIGHT)}")
             return cap
         
-        print(f"[ImageProcessor] Failed to open camera: {idx}")
-        self._failed_caps.add(cam_id)
+        print(f"[ImageProcessor] Failed to open camera: {idx} after all attempts.")
+        self._failed_caps[cam_id] = time.time()
         return None
 
     @staticmethod
-    def discover_cameras():
-        """Probes common indices to find available cameras on host."""
-        available = []
-        # Probe first 5 indices
-        for i in range(5):
-            cap = cv2.VideoCapture(i)
-            if cap.isOpened():
-                available.append({
-                    "id": str(i),
-                    "name": f"Host Camera {i}",
-                    "type": "stream"
-                })
-                cap.release()
-        return available
+    def discover_cameras(max_cameras=4):
+        import subprocess
+        
+        # 1. Try to get real names from system_profiler (macOS specific)
+        real_names = []
+        try:
+            cmd = ["system_profiler", "SPCameraDataType", "-json"]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                data = json.loads(result.stdout)
+                items = data.get('SPCameraDataType', [])
+                # The order in system_profiler USUALLY matches OpenCV indices for connected USB/Internal cams.
+                for item in items:
+                    real_names.append(item.get('_name', 'Unknown Camera'))
+        except Exception as e:
+            print(f"[Discovery] System Profiler failed: {e}")
+
+        available_cameras = []
+        
+        # 2. Check indices with OpenCV
+        for i in range(max_cameras):
+            cap = None
+            try:
+                # Attempt 1: Standard
+                cap = cv2.VideoCapture(i)
+                if not cap.isOpened():
+                    # Attempt 2: MJPEG fallback (some cameras refuse to open without it)
+                    cap.release()
+                    cap = cv2.VideoCapture(i)
+                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+                
+                if cap.isOpened():
+                    # Name resolution
+                    if i < len(real_names):
+                        name = f"{real_names[i]} (Device {i})"
+                    else:
+                        name = f"Camera Device {i}"
+                        
+                    print(f"[Discovery] Found camera {i}: {name}")
+                    available_cameras.append({'id': str(i), 'name': name, 'type': 'stream'})
+            except Exception as e:
+                print(f"[Discovery] Error checking camera {i}: {e}")
+            finally:
+                if cap: cap.release()
+                
+        return available_cameras
 
     def read_frame(self, cam_id):
         """
@@ -342,9 +421,22 @@ class ImageProcessor:
         """
         cap = self.get_cap(cam_id)
         if cap and cap.isOpened():
-            ret, frame = cap.read()
-            if ret:
-                return frame
+            # Retry logic for frame reading
+            for _ in range(3):
+                ret, frame = cap.read()
+                if ret:
+                    return frame
+                # If fail, wait tiny bit and retry
+                time.sleep(0.01)
+
+            # If we get here, we failed 3 times in a row
+            print(f"[ImageProcessor] Failed to read frame from {cam_id} (3 retries). Releasing...")
+            cap.release()
+            if cam_id in self.caps:
+                del self.caps[cam_id]
+            # Force a cooldown/fail state so we don't spam open/close
+            self._failed_caps[cam_id] = time.time()
+                 
         return None
 
     def capture_frame(self, cam_id):

@@ -192,14 +192,38 @@ async function fetchCameras() {
             console.warn('Browser camera access denied/unavailable');
         }
 
+        // Check for swap preference
+        const isSwapped = localStorage.getItem('swapCameraSources') === 'true';
+
         // 3. Populate appState.cameras with host devices
         window.appState.cameras = hostCameras.map((hc, index) => {
-            // Assume order might match for local session, else just use backend ID
-            const browserMatch = browserDevices[index];
+            // Apply swap if active and we have enough devices
+            let browserIndex = index;
+            if (isSwapped) {
+                // Force toggle even if we don't have enough devices (maps out of bounds to undefined => blank)
+                if (index === 0) browserIndex = 1;
+                else if (index === 1) browserIndex = 0;
+            }
+
+            // Try to match by label (fuzzy) or index
+            let browserMatch = null;
+
+            // 1. Try exact label match
+            browserMatch = browserDevices.find(bd => bd.label === hc.name);
+
+            // 2. Try index match if labels don't work (and no other match found)
+            if (!browserMatch && browserDevices[browserIndex]) {
+                browserMatch = browserDevices[browserIndex];
+            }
+
+            // 3. Last resort: If we have devices but no match, DO NOT just pick [0] unless it's the only one and we are desperate. 
+            // Better to fail gracefully than show wrong feed.
+            // HOWEVER, Chrome often obscures labels until permission is granted, so checking index is key.
+
             return {
                 id: hc.id, // backend ID/index (for saving)
                 name: hc.name,
-                deviceId: browserMatch ? browserMatch.deviceId : hc.id, // for getUserMedia preview
+                deviceId: browserMatch ? browserMatch.deviceId : null, // for getUserMedia preview
                 type: 'stream'
             };
         });
@@ -242,7 +266,10 @@ function renderConfigUI(container) {
                 <div class="sidebar-section">
                     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:var(--space-sm);">
                         <h3>Available Cameras</h3>
-                        <button class="btn btn-secondary btn-sm" id="btn-refresh-cameras" style="padding:2px 6px; font-size:0.7rem;">↻</button>
+                        <div style="display:flex; gap:4px;">
+                            <button class="btn btn-secondary btn-sm" id="btn-swap-cams" title="Swap Preview Sources" style="padding:2px 6px; font-size:0.7rem;">⇄</button>
+                            <button class="btn btn-secondary btn-sm" id="btn-refresh-cameras" style="padding:2px 6px; font-size:0.7rem;">↻</button>
+                        </div>
                     </div>
                     <div class="camera-list" id="camera-list"></div>
                 </div>
@@ -686,7 +713,20 @@ function bindEvents() {
         activeDisplayId = null; renderOverlays(); renderDisplayList(); document.getElementById('property-panel').style.display = 'none';
         updateUndoRedoButtons();
     });
-    document.getElementById('btn-refresh-cameras').addEventListener('click', fetchCameras);
+    document.getElementById('btn-refresh-cameras').addEventListener('click', async () => {
+        try {
+            await fetch('/api/cameras/reset', { method: 'POST' });
+            console.log('Cameras reset on backend.');
+        } catch (e) {
+            console.error('Reset failed:', e);
+        }
+        fetchCameras();
+    });
+    document.getElementById('btn-swap-cams').addEventListener('click', () => {
+        const current = localStorage.getItem('swapCameraSources') === 'true';
+        localStorage.setItem('swapCameraSources', !current);
+        fetchCameras();
+    });
     document.getElementById('btn-toggle-view').addEventListener('click', () => {
         viewMode = (viewMode === 'fit') ? 'native' : 'fit';
         const container = document.getElementById('canvas-container');
@@ -778,7 +818,16 @@ window.selectCamera = function (id) {
     stopActiveStream();
 
     if (cam.type === 'stream') {
-        const constraintId = cam.deviceId || id;
+        if (!cam.deviceId) {
+            msg.innerText = 'Camera detected by backend but browser cannot access it. Check browser permissions or try refreshing the page.';
+            msg.style.display = 'block';
+            toolbar.style.display = 'none';
+            renderOverlays();
+            renderDisplayList();
+            return;
+        }
+
+        const constraintId = cam.deviceId;
         navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: constraintId } } })
             .then(stream => {
                 video.srcObject = stream;
