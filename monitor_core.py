@@ -384,50 +384,76 @@ class ImageProcessor:
     @staticmethod
     def discover_cameras(max_cameras=4):
         import subprocess
+        import json
         
-        # 1. Try to get real names from system_profiler (macOS specific)
-        real_names = []
+        # 1. Try to get real names and unique IDs from system_profiler (macOS specific)
+        camera_info = [] # List of {'name': ..., 'hardware_id': ...}
         try:
             cmd = ["system_profiler", "SPCameraDataType", "-json"]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
             if result.returncode == 0:
                 data = json.loads(result.stdout)
                 items = data.get('SPCameraDataType', [])
-                # The order in system_profiler USUALLY matches OpenCV indices for connected USB/Internal cams.
                 for item in items:
-                    real_names.append(item.get('_name', 'Unknown Camera'))
+                    camera_info.append({
+                        'name': item.get('_name', 'Unknown Camera'),
+                        'hardware_id': item.get('spcamera_unique-id', 'Unknown ID')
+                    })
+            logger.debug(f"[Discovery] System Profiler found: {camera_info}")
         except Exception as e:
             logger.debug(f"[Discovery] System Profiler failed: {e}")
 
         available_cameras = []
         
-        # 2. Check indices with OpenCV
+        # 2. Check indices with OpenCV and gather their "signatures"
+        probed_cams = []
+        common_resolutions = [
+            (1920, 1080), (1280, 720), (1024, 768), 
+            (800, 600), (640, 480), (320, 240), (160, 120)
+        ]
+        
         for i in range(max_cameras):
-            cap = None
-            try:
-                # Attempt 1: Standard
-                cap = cv2.VideoCapture(i)
-                if not cap.isOpened():
-                    # Attempt 2: MJPEG fallback (some cameras refuse to open without it)
-                    cap.release()
-                    cap = cv2.VideoCapture(i)
-                    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                supported_count = 0
+                for w_req, h_req in common_resolutions:
+                    cap.set(cv2.CAP_PROP_FRAME_WIDTH, w_req)
+                    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h_req)
+                    w_act = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+                    h_act = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                    if w_act == w_req and h_act == h_req:
+                        supported_count += 1
                 
-                if cap.isOpened():
-                    # Name resolution
-                    if i < len(real_names):
-                        name = f"{real_names[i]} (Device {i})"
-                    else:
-                        name = f"Camera Device {i}"
-                        
-                    logger.info(f"Camera discovered - Index: {i}, Name: {name}")
-                    available_cameras.append({'id': str(i), 'name': name, 'type': 'stream'})
-            except Exception as e:
-                logger.error(f"Error discovering camera {i}: {e}")
-            finally:
-                if cap: cap.release()
+                probed_cams.append({
+                    'index': i,
+                    'complexity': supported_count,
+                    'is_high_res': supported_count > 4
+                })
+                cap.release()
+        
+        # 3. Pair Probed Cameras with System Profiler Names (Complexity-Aware)
+        sys_internal = [c for c in camera_info if any(k in c['name'].lower() for k in ['macbook', 'facetime', 'built-in'])]
+        sys_external = [c for c in camera_info if c not in sys_internal]
+        
+        probed_sorted = sorted(probed_cams, key=lambda x: x['complexity'])
+        sys_sorted = sys_internal + sys_external
+        
+        for idx, probed in enumerate(probed_sorted):
+            if idx < len(sys_sorted):
+                info = sys_sorted[idx]
+                name = f"{info['name']} (Device {probed['index']})"
+                hw_id = info['hardware_id']
+            else:
+                name = f"Camera Device {probed['index']}"
+                hw_id = f"UNKNOWN_{probed['index']}"
+                
+            logger.info(f"Camera discovered - Index: {probed['index']}, Name: {name}, HW ID: {hw_id}")
+            available_cameras.append({
+                'id': str(probed['index']), 
+                'name': name, 
+                'hardware_id': hw_id,
+                'type': 'stream'
+            })
                 
         logger.info(f"Camera discovery complete - Found {len(available_cameras)} camera(s)")
         return available_cameras

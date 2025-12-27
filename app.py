@@ -170,6 +170,33 @@ class MonitorSystem:
         
         return frame
 
+    def _get_no_signal_frame(self, display_name, target_size=(1280, 720)):
+        """Generates a black frame with a prominent 'NO SIGNAL' message."""
+        w, h = target_size
+        frame = np.zeros((h, w, 3), dtype=np.uint8)
+        
+        # Draw "NO SIGNAL"
+        text = "NO SIGNAL"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        scale = 3.0
+        thick = 10
+        (tw, th), baseline = cv2.getTextSize(text, font, scale, thick)
+        tx, ty = (w - tw) // 2, (h + th) // 2 - 50
+        
+        # Red neon effect
+        cv2.putText(frame, text, (tx+2, ty+2), font, scale, (0, 0, 150), thick+2, cv2.LINE_AA)
+        cv2.putText(frame, text, (tx, ty), font, scale, (0, 0, 255), thick, cv2.LINE_AA)
+        
+        # Sub-title
+        sub_text = f"Source: {display_name}"
+        sub_scale = 1.0
+        sub_thick = 2
+        (sw, sh), s_baseline = cv2.getTextSize(sub_text, font, sub_scale, sub_thick)
+        sx, sy = (w - sw) // 2, ty + 100
+        cv2.putText(frame, sub_text, (sx, sy), font, sub_scale, (200, 200, 200), sub_thick, cv2.LINE_AA)
+        
+        return frame
+
     def start(self):
         self.thread = threading.Thread(target=self._capture_loop, daemon=True)
         self.thread.start()
@@ -318,62 +345,90 @@ class MonitorSystem:
         return canvas
 
     def _reconcile_cameras(self, force_discovery=False):
-        """Matches configured camera names to current hardware IDs"""
+        """Matches configured camera groups to current hardware using unique IDs and names."""
         import re
         logger = logging.getLogger('MonitorSystem')
 
         def normalize_name(n):
+            if not n: return ""
             base = re.sub(r'\s*\(Device \d+\)$', '', n, flags=re.IGNORECASE).strip().lower()
             return base
 
         logger.info("=" * 50)
-        logger.info(f"CAMERA RECONCILIATION START (Force={force_discovery})")
+        logger.info(f"STABLE CAMERA RECONCILIATION START (Force={force_discovery})")
         logger.info("=" * 50)
         
         if force_discovery or not self.cached_hardware_cams:
             self.cached_hardware_cams = self.processor.discover_cameras()
-            logger.info(f"Hardware camera discovery performed: {len(self.cached_hardware_cams)} found.")
+            logger.info(f"Hardware discovery completed: {len(self.cached_hardware_cams)} found.")
         
-        current_cams = self.cached_hardware_cams
-        cams_by_norm = {}
-        for c in current_cams:
-            norm = normalize_name(c['name'])
-            cams_by_norm[norm] = c
+        hardware_cams = self.cached_hardware_cams
         
+        # 1. Group Logical Displays by their intended source (ID or Name)
+        source_groups = {} # key -> list of display objects
         for d in self.loader.displays:
-            saved_full_name = d.get('camera_name')
-            if saved_full_name:
-                saved_norm = normalize_name(saved_full_name)
-                matched_cam = None
+            # Use hardware_id as primary key if we have it, else fallback to name
+            key = d.get('hardware_id') or d.get('camera_name')
+            if not key: continue
+            
+            if key not in source_groups:
+                source_groups[key] = []
+            source_groups[key].append(d)
+
+        # 2. Match each Source Group to a Physical Hardware Camera
+        assigned_hardware_ids = set() # Unique spcamera_unique-id or simulated HW ID
+        
+        for key, group in source_groups.items():
+            representative = group[0]
+            target_hw_id = representative.get('hardware_id')
+            target_name = representative.get('camera_name')
+            target_norm = normalize_name(target_name)
+            
+            matched_cam = None
+
+            # Pass 1: Match by Unique Hardware ID (Most stable)
+            if target_hw_id:
+                for h in hardware_cams:
+                    if h.get('hardware_id') == target_hw_id:
+                        matched_cam = h
+                        break
+            
+            # Pass 2: Exact Name Match
+            if not matched_cam and target_name:
+                for h in hardware_cams:
+                    if h['hardware_id'] in assigned_hardware_ids: continue
+                    if h['name'] == target_name:
+                        matched_cam = h
+                        break
+            
+            # Pass 3: Fuzzy Name Match
+            if not matched_cam and target_norm:
+                for h in hardware_cams:
+                    if h['hardware_id'] in assigned_hardware_ids: continue
+                    h_norm = normalize_name(h['name'])
+                    if target_norm == h_norm or target_norm in h_norm or h_norm in target_norm:
+                        matched_cam = h
+                        break
+
+            # 3. Apply matches or mark as missing
+            if matched_cam:
+                new_idx = matched_cam['id']
+                hw_id = matched_cam['hardware_id']
+                hw_name = matched_cam['name']
+                assigned_hardware_ids.add(hw_id)
                 
-                if saved_norm in cams_by_norm:
-                    matched_cam = cams_by_norm[saved_norm]
-                
-                if not matched_cam:
-                    for c_norm, c_obj in cams_by_norm.items():
-                        if saved_norm in c_norm or c_norm in saved_norm:
-                            matched_cam = c_obj
-                            break
-                        if "macbook" in saved_norm and "macbook" in c_norm:
-                            matched_cam = c_obj
-                            break
-                        if "webcam" in saved_norm and "webcam" in c_norm:
-                            matched_cam = c_obj
-                            break
-                
-                if matched_cam:
-                    new_id = matched_cam['id']
-                    # Update both ID and camera_name to stay in sync with hardware
-                    if d.get('camId') != new_id or d.get('camera_name') != matched_cam['name']:
-                        logger.info(f"REMAPPING: '{d.get('name')}' -> {new_id} ('{matched_cam['name']}')")
-                        d['camId'] = new_id
-                        d['camera_name'] = matched_cam['name']
+                for d in group:
+                    if d.get('camId') != new_idx or d.get('hardware_id') != hw_id:
+                        logger.info(f"MAPPED GROUP: source '{key}' -> idx {new_idx} ('{hw_name}')")
+                    
+                    d['camId'] = new_idx
+                    d['hardware_id'] = hw_id
+                    d['camera_name'] = hw_name # Keep in sync
                     d['missing_camera'] = False
-                else:
-                    logger.warning(f"Camera '{saved_full_name}' NOT FOUND for display '{d.get('name')}'.")
-                    d['missing_camera'] = True
             else:
-                d['missing_camera'] = False
+                logger.warning(f"MISSING GROUP: Source '{key}' NOT FOUND.")
+                for d in group:
+                    d['missing_camera'] = True
         
         logger.info("CAMERA RECONCILIATION COMPLETE")
         logger.info("=" * 50)
@@ -404,8 +459,7 @@ class MonitorSystem:
                 cam_displays = {}
                 for d in active_displays:
                     if d.get('missing_camera', False):
-                        # Force status update to NO SIGNAL for missing cams
-                        # (Still use lock for shared state latest_status)
+                        # Force status update to OFFLINE for missing cams
                         with self.lock:
                              self.latest_status[d['id']] = {
                                 'id': d['id'],
@@ -413,8 +467,15 @@ class MonitorSystem:
                                 'camId': d.get('camId', '?'),
                                 'timestamp': time.time() * 1000,
                                 'status': 'OFFLINE',
-                                'metrics': {'error': 'Camera Disconnected'}
+                                'metrics': {'error': 'Camera Not Found'}
                              }
+                             
+                             # Inject "NO SIGNAL" placeholder
+                             placeholder = self._get_no_signal_frame(d.get('name', d['id']))
+                             self.latest_frames_raw[d['id']] = placeholder
+                             ret, jpeg = cv2.imencode('.jpg', placeholder, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+                             if ret:
+                                 self.latest_frames[d['id']] = jpeg.tobytes()
                         continue
 
                     cid = d.get('camId', 0)
@@ -445,6 +506,12 @@ class MonitorSystem:
                                     'status': 'NO_SIGNAL',
                                     'metrics': {'error': 'Camera Disconnected'}
                                 }
+                                # Inject "NO SIGNAL" placeholder for disconnected cam
+                                placeholder = self._get_no_signal_frame(d.get('name', d['id']))
+                                self.latest_frames_raw[d['id']] = placeholder
+                                ret, jpeg = cv2.imencode('.jpg', placeholder, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+                                if ret:
+                                    self.latest_frames[d['id']] = jpeg.tobytes()
                         continue
                         
                     for d in displays:

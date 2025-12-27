@@ -83,15 +83,23 @@ function renderEmptyState() {
 function renderGrid(displays) {
     const grid = document.getElementById('monitor-grid');
 
-    // Group displays by camera
+    // Group displays by hardware_id (stable unique ID)
     const groups = {};
     displays.forEach(d => {
-        const camLabel = d.camera_name || d.camId || 'Unknown Camera';
-        if (!groups[camLabel]) groups[camLabel] = [];
-        groups[camLabel].push(d);
+        // Group by hardware_id if available, otherwise fallback to camera_name or camId
+        const groupKey = d.hardware_id || d.camera_name || d.camId || 'Unknown';
+        if (!groups[groupKey]) {
+            groups[groupKey] = {
+                label: d.camera_name || groupKey,
+                displays: []
+            };
+        }
+        groups[groupKey].displays.push(d);
     });
 
-    grid.innerHTML = Object.entries(groups).map(([camLabel, camDisplays]) => {
+    grid.innerHTML = Object.values(groups).map(group => {
+        const camLabel = group.label;
+        const camDisplays = group.displays;
         return `
         <div class="camera-group">
             <div class="camera-group-header">

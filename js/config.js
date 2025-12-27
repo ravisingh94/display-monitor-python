@@ -142,6 +142,7 @@ async function saveConfig() {
                 name: d.name,
                 camId: d.camId,
                 camera_name: camera ? camera.name : 'Unknown',
+                hardware_id: d.hardware_id || (camera ? camera.hardware_id : null),
                 corners: corners,
                 x: Math.min(...corners.map(c => c.x)),
                 y: Math.min(...corners.map(c => c.y)),
@@ -234,6 +235,7 @@ async function fetchCameras() {
             return {
                 id: hc.id, // backend ID/index (for saving)
                 name: hc.name,
+                hardware_id: hc.hardware_id,
                 deviceId: browserMatch ? browserMatch.deviceId : null, // for getUserMedia preview
                 type: 'stream'
             };
@@ -266,8 +268,9 @@ function autoFuzzyMatch() {
 
         const savedBaseName = normalizeCameraName(d.camera_name);
 
-        // Find matching camera by base name (ignoring device index)
+        // Find matching camera: Priority 1 - Stable hardware_id, Priority 2 - Base name
         const match = window.appState.cameras.find(c => {
+            if (d.hardware_id && c.hardware_id === d.hardware_id) return true;
             const currentBaseName = normalizeCameraName(c.name);
             return currentBaseName === savedBaseName;
         });
