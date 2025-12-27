@@ -560,15 +560,23 @@ class MonitorSystem:
                             }
                             
                             if status != prev_status and self.sess_id:
-                                self.log_event("STATUS_CHANGE", f"Changed from {prev_status} to {status}", display_name=d.get('name'))
+                                self.log_event("STATUS_CHANGE", f"Status: {status} (was {prev_status})", display_name=d.get('name'))
                             
                             if metrics.get('glitch') and self.sess_id:
-                                g_types = metrics.get('glitch_types', [])
-                                self.log_event("GLITCH_DETECTED", f"Types: {g_types}", display_name=d.get('name'))
+                                g_types = metrics.get('glitch_type', [])
+                                severity = metrics.get('glitch_severity', 'LOW')
+                                # Include status and OCR context in glitch log as requested
+                                ocr_context = f" | OCR: {metrics.get('ocr_text')[:50]}" if metrics.get('ocr_text') else ""
+                                self.log_event("GLITCH_DETECTED", f"Status: {status} | Severity: {severity} | Types: {g_types}{ocr_context}", display_name=d.get('name'))
                             
-                            if metrics.get('ocr_match') and self.sess_id:
-                                ocr_text = metrics.get('ocr_match')
-                                self.log_event("OCR_MATCH", f"Negative text detected: {ocr_text}", display_name=d.get('name'))
+                            if metrics.get('ocr_pattern') and self.sess_id:
+                                pattern = metrics.get('ocr_pattern')
+                                full_text = metrics.get('ocr_text', '')
+                                self.log_event("OCR_NEGATIVE_MATCH", f"Status: {status} | Pattern: {pattern} | Text: {full_text}", display_name=d.get('name'))
+                            elif metrics.get('ocr_detected') and self.sess_id:
+                                # Regular OCR recording
+                                full_text = metrics.get('ocr_text', '')
+                                self.log_event("OCR_DETECTED", f"Status: {status} | Text: {full_text}", display_name=d.get('name'))
 
                 # Handling recording in the loop (Time-Based Synchronization)
                 if self.sess_id:

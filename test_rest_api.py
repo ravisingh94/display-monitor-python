@@ -100,7 +100,7 @@ if __name__ == "__main__":
             # print(test_continuous_monitor())
             
         # #     # 6. Test timer (short)
-            print(test_timer(10))
+            print(test_timer(20))
             
         # else:
         #     print("No displays configured. Skipping lookup tests.")
