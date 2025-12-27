@@ -133,6 +133,43 @@ class MonitorSystem:
         self.reconcile_cameras()
         print(f"[MonitorSystem] Initialized {len(self.engines)} display engines.")
 
+    def _apply_display_annotations(self, frame, d_name, c_name, is_small=False, show_timestamp=True):
+        """Adds borders, metadata labels, and optional timestamp to a frame."""
+        import datetime
+        h, w = frame.shape[:2]
+        
+        # 1. Border (White, 1px)
+        cv2.rectangle(frame, (0, 0), (w-1, h-1), (255, 255, 255), 1)
+        
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        f_scale = 0.4 if is_small else 0.6
+        f_thick = 1
+        
+        # 2. Timestamp (If enabled)
+        if show_timestamp:
+            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            (tw, th), baseline = cv2.getTextSize(timestamp, font, f_scale, f_thick)
+            tx, ty = w - tw - 10, th + 10
+            
+            # Timestamp Box
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (tx - 5, ty - th - 5), (w - 5, ty + 5), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
+            cv2.putText(frame, timestamp, (tx, ty), font, f_scale, (255, 255, 255), f_thick, cv2.LINE_AA)
+        
+        # 3. Bottom label (Display | Camera)
+        label = f"{d_name} | {c_name}"
+        (lw, lh), l_baseline = cv2.getTextSize(label, font, f_scale, f_thick)
+        lx, ly = 10, h - 10
+        
+        # Label Box
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, h - lh - 15), (w, h), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
+        cv2.putText(frame, label, (lx, ly), font, f_scale, (255, 255, 255), f_thick, cv2.LINE_AA)
+        
+        return frame
+
     def start(self):
         self.thread = threading.Thread(target=self._capture_loop, daemon=True)
         self.thread.start()
@@ -225,27 +262,58 @@ class MonitorSystem:
             print(f"[MonitorSystem] Log error: {e}")
 
     def _get_tiled_frame(self):
-        """Creates a tiled view of all displays for recording"""
-        with self.lock:
-            display_frames = list(self.latest_frames_raw.values())
+        """Creates a tiled view of all displays for recording with borders and labels"""
+        # Map display IDs to metadata for labeling
+        display_map = {d['id']: d for d in self.loader.displays}
         
-        if not display_frames:
+        with self.lock:
+            # Get a snapshot of current frames and their IDs
+            display_items = list(self.latest_frames_raw.items())
+        
+        if not display_items:
             return None
         
-        # Target tile size (e.g. 640x360)
+        # Target tile size (preserving aspect ratio via letterboxing)
         t_w, t_h = 640, 360
-        count = len(display_frames)
+        count = len(display_items)
         cols = int(np.ceil(np.sqrt(count)))
         rows = int(np.ceil(count / cols))
         
         canvas = np.zeros((rows * t_h, cols * t_w, 3), dtype=np.uint8)
         
-        for i, frame in enumerate(display_frames):
+        for i, (did, frame) in enumerate(display_items):
             r = i // cols
             c = i % cols
-            # Resize to fit tile while preserving aspect ratio
+            
+            # Step 1: Resize with aspect ratio
             resized = self._resize_with_aspect(frame, (t_w, t_h))
+            
+            # Step 2: Add visual annotations (Borders and Labels)
+            d_meta = display_map.get(did, {})
+            d_name = d_meta.get('name', did)
+            c_name = d_meta.get('camera_name', 'Unknown Cam')
+            
+            # Apply focused annotations for the tile size (NO timestamp per tile)
+            self._apply_display_annotations(resized, d_name, c_name, is_small=True, show_timestamp=False)
+            
+            # Place on canvas
             canvas[r*t_h:(r+1)*t_h, c*t_w:(c+1)*t_w] = resized
+        
+        # Step 3: Global Timestamp at top-right of entire canvas
+        import datetime
+        h, w = canvas.shape[:2]
+        timestamp = f"GLOBAL TIME: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        f_scale = 0.8
+        f_thick = 2
+        (tw, th), baseline = cv2.getTextSize(timestamp, font, f_scale, f_thick)
+        tx, ty = w - tw - 20, th + 20
+        
+        # Overlay box for readability
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (tx - 10, ty - th - 10), (w - 10, ty + 10), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.5, canvas, 0.5, 0, canvas)
+        cv2.putText(canvas, timestamp, (tx, ty), font, f_scale, (255, 255, 255), f_thick, cv2.LINE_AA)
             
         return canvas
 
@@ -382,7 +450,7 @@ class MonitorSystem:
                     for d in displays:
                         did = d['id']
                         try:
-                            # Extract region
+                            # Extract region (KEEP CLEAN in internal storage)
                             disp_frame = self.processor.process_display(frame, d)
                             if disp_frame is None:
                                 continue
@@ -501,11 +569,17 @@ def video_feed(display_id):
 
 @app.route('/api/monitor/frame/<display_id>')
 def get_display_frame(display_id):
-    """Returns a single latest JPEG frame for a display"""
+    """Returns a single latest JPEG frame for a display (RAW)"""
     with monitor_sys.lock:
-        frame = monitor_sys.latest_frames.get(display_id)
-    if frame:
-        return Response(frame, mimetype='image/jpeg')
+        raw = monitor_sys.latest_frames_raw.get(display_id)
+        # Deep copy to avoid modifying shared state
+        frame = raw.copy() if raw is not None else None
+    
+    if frame is not None:
+        ret, jpeg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        if ret:
+            return Response(jpeg.tobytes(), mimetype='image/jpeg')
+            
     return "No Frame", 404
 
 def generate_stream(display_id):
@@ -524,17 +598,25 @@ def generate_stream(display_id):
 
 @app.route('/api/monitor/snapshot')
 def get_monitor_snapshot():
-    """Returns status AND base64 frames for all displays in one go (Bypasses connection limits)"""
+    """Returns status AND base64 frames for all displays (RAW)"""
     import base64
     with monitor_sys.lock:
-        snapshot = {
-            'statuses': list(monitor_sys.latest_status.values()),
-            'frames': {
-                did: base64.b64encode(frame).decode('utf-8')
-                for did, frame in monitor_sys.latest_frames.items()
-            }
-        }
-    return jsonify(snapshot)
+        statuses = list(monitor_sys.latest_status.values())
+        raw_frames = {k: v.copy() for k, v in monitor_sys.latest_frames_raw.items()}
+        
+    encoded_frames = {}
+    for did, frame in raw_frames.items():
+        try:
+            ret, jpeg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 60])
+            if ret:
+                encoded_frames[did] = base64.b64encode(jpeg.tobytes()).decode('utf-8')
+        except:
+            continue
+
+    return jsonify({
+        'statuses': statuses,
+        'frames': encoded_frames
+    })
 
 @app.route('/api/monitor/status')
 def get_monitor_status():
@@ -1055,7 +1137,7 @@ def api_get_status():
 
 @app.route('/api/displays/get-frame')
 def api_get_frame():
-    """Returns JPEG of current frame for specified display"""
+    """Returns JPEG of current frame for specified display (RAW)"""
     name = request.args.get('name')
     did_input = request.args.get('id')
     
@@ -1064,10 +1146,14 @@ def api_get_frame():
         return "Display not found", 404
         
     with monitor_sys.lock:
-        frame = monitor_sys.latest_frames.get(target_id)
+        raw = monitor_sys.latest_frames_raw.get(target_id)
+        frame = raw.copy() if raw is not None else None
         
-    if frame:
-        return Response(frame, mimetype='image/jpeg')
+    if frame is not None:
+        ret, jpeg = cv2.imencode('.jpg', frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        if ret:
+            return Response(jpeg.tobytes(), mimetype='image/jpeg')
+            
     return "No Frame", 404
 
 @app.route('/api/displays/get-combined')
