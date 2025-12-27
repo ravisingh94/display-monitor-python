@@ -186,7 +186,7 @@ class DisplayStatusEngine:
         self.prev_gray = gray.copy()
         
         # Glitch detection
-        glitch_result = self.glitch_detector.detect(frame)
+        glitch_result = self.glitch_detector.detect(frame, display_name=display_name, camera_id=camera_id)
         
         # OCR Detection
         now = time.time()

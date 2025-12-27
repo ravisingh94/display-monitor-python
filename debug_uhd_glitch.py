@@ -53,7 +53,7 @@ def debug_video_at_19s():
         ret, frame = cap.read()
         if not ret: break
         
-        res = detector.detect(frame)
+        res = detector.detect(frame, display_name=os.path.basename(video_path))
         m = detector.last_metrics
         s = m['glitch_signals']
         

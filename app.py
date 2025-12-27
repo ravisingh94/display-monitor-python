@@ -749,7 +749,7 @@ def stream_analysis(session_id):
                 current_second = int(current_time)
                 
                 # 1. Glitch Detection
-                result = detector.detect(frame)
+                result = detector.detect(frame, display_name=os.path.basename(filepath))
                 
                 # 2. OCR Detection (Interval based)
                 should_run_ocr = False

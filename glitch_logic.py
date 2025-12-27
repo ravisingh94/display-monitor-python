@@ -39,7 +39,16 @@ class GlitchDetector:
             "mean_brightness": 0.0
         }
 
-    def detect(self, frame):
+    def detect(self, frame, display_name=None, camera_id=None):
+        # Build context string for logging
+        context = ""
+        if display_name and camera_id:
+            context = f"[Display: {display_name}, Camera: {camera_id}] "
+        elif display_name:
+            context = f"[Display: {display_name}] "
+        elif camera_id:
+            context = f"[Camera: {camera_id}] "
+
         # Resize large frames to improve performance (max width 640px)
         h, w = frame.shape[:2]
         if w > 640:
@@ -170,8 +179,8 @@ class GlitchDetector:
         
         # Log glitch detection
         if is_start:
-            logger.warning(f"GLITCH DETECTED - Type: {', '.join(glitch_types)}, Severity: {severity}")
-        logger.debug(f"Glitch active - Types: {glitch_types}, Diff: {diff_score:.2f}, Noise: {noise_variance:.1f}")
+            logger.warning(f"{context}GLITCH DETECTED - Type: {', '.join(glitch_types)}, Severity: {severity}")
+        logger.debug(f"{context}Glitch active - Types: {glitch_types}, Diff: {diff_score:.2f}, Noise: {noise_variance:.1f}")
 
         return {
             "glitch": True,
@@ -305,7 +314,7 @@ def process_video_second_wise(video_path, config):
     while True:
         ret, frame = cap.read()
         if not ret: break
-        result = detector.detect(frame)
+        result = detector.detect(frame, display_name=os.path.basename(video_path))
         if result["glitch"]:
             second = int(frame_idx / fps)
             if second not in second_wise_glitches:
