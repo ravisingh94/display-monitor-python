@@ -192,33 +192,44 @@ async function fetchCameras() {
             console.warn('Browser camera access denied/unavailable');
         }
 
-        // Check for swap preference
-        const isSwapped = localStorage.getItem('swapCameraSources') === 'true';
-
         // 3. Populate appState.cameras with host devices
         window.appState.cameras = hostCameras.map((hc, index) => {
-            // Apply swap if active and we have enough devices
-            let browserIndex = index;
-            if (isSwapped) {
-                // Force toggle even if we don't have enough devices (maps out of bounds to undefined => blank)
-                if (index === 0) browserIndex = 1;
-                else if (index === 1) browserIndex = 0;
-            }
-
-            // Try to match by label (fuzzy) or index
             let browserMatch = null;
 
-            // 1. Try exact label match
+            // Only use label-based matching - DO NOT use index as browser order is unstable
+            // Try multiple matching strategies:
+
+            // 1. Exact label match (e.g., "HP 320 FHD Webcam (Device 0)" === "HP 320 FHD Webcam (Device 0)")
             browserMatch = browserDevices.find(bd => bd.label === hc.name);
 
-            // 2. Try index match if labels don't work (and no other match found)
-            if (!browserMatch && browserDevices[browserIndex]) {
-                browserMatch = browserDevices[browserIndex];
+            // 2. Fuzzy match by checking if browser label contains key parts of backend name
+            if (!browserMatch) {
+                // Extract key identifying words from backend name (e.g., "HP", "MacBook")
+                const backendKeywords = hc.name.toLowerCase().split(/\s+/).filter(w =>
+                    w.length > 3 && !['device', 'camera', 'webcam'].includes(w)
+                );
+
+                browserMatch = browserDevices.find(bd => {
+                    const browserLabel = bd.label.toLowerCase();
+                    // Match if browser label contains all key backend keywords
+                    return backendKeywords.every(keyword => browserLabel.includes(keyword));
+                });
             }
 
-            // 3. Last resort: If we have devices but no match, DO NOT just pick [0] unless it's the only one and we are desperate. 
-            // Better to fail gracefully than show wrong feed.
-            // HOWEVER, Chrome often obscures labels until permission is granted, so checking index is key.
+            // 3. Last resort: partial name match (e.g., "HP" in both, "MacBook" in both)
+            if (!browserMatch) {
+                const backendLower = hc.name.toLowerCase();
+                browserMatch = browserDevices.find(bd => {
+                    const browserLower = bd.label.toLowerCase();
+                    // Check for common brand names
+                    if (backendLower.includes('macbook') && browserLower.includes('macbook')) return true;
+                    if (backendLower.includes('hp') && browserLower.includes('hp')) return true;
+                    if (backendLower.includes('logitech') && browserLower.includes('logitech')) return true;
+                    return false;
+                });
+            }
+
+            console.log(`Camera ${hc.id} (${hc.name}): ${browserMatch ? 'Matched to ' + browserMatch.label : 'No browser match'}`);
 
             return {
                 id: hc.id, // backend ID/index (for saving)
@@ -244,16 +255,34 @@ async function fetchCameras() {
  */
 function autoFuzzyMatch() {
     console.log('Running auto-fuzzy matching pass...');
+
+    // Helper to normalize camera names by removing device suffix
+    function normalizeCameraName(name) {
+        return name.replace(/\s*\(Device\s+\d+\)\s*$/i, '').trim().toLowerCase();
+    }
+
     window.appState.displays.forEach(d => {
-        // If current camId is not found in the active hardware list
-        if (!window.appState.cameras.find(c => c.id === d.camId)) {
-            if (d.camera_name) {
-                const match = window.appState.cameras.find(c => c.name.trim() === d.camera_name.trim());
-                if (match) {
-                    console.log(`Reconnected display "${d.name}" to camera "${match.name}" (ID updated)`);
-                    d.camId = match.id;
-                }
+        if (!d.camera_name) return; // Skip if no saved camera name
+
+        const savedBaseName = normalizeCameraName(d.camera_name);
+
+        // Find matching camera by base name (ignoring device index)
+        const match = window.appState.cameras.find(c => {
+            const currentBaseName = normalizeCameraName(c.name);
+            return currentBaseName === savedBaseName;
+        });
+
+        if (match) {
+            // Update camId if it changed
+            if (d.camId !== match.id) {
+                console.log(`Auto-remapping display "${d.name}": "${d.camera_name}" -> Camera ID ${match.id} ("${match.name}")`);
+                d.camId = match.id;
+                // Also update the saved camera_name to match current naming
+                d.camera_name = match.name;
             }
+        } else {
+            // Camera not found - log warning
+            console.warn(`Display "${d.name}" configured for camera "${d.camera_name}" but camera not found.`);
         }
     });
 }
@@ -267,7 +296,7 @@ function renderConfigUI(container) {
                     <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:var(--space-sm);">
                         <h3>Available Cameras</h3>
                         <div style="display:flex; gap:4px;">
-                            <button class="btn btn-secondary btn-sm" id="btn-swap-cams" title="Swap Preview Sources" style="padding:2px 6px; font-size:0.7rem;">⇄</button>
+
                             <button class="btn btn-secondary btn-sm" id="btn-refresh-cameras" style="padding:2px 6px; font-size:0.7rem;">↻</button>
                         </div>
                     </div>
@@ -722,11 +751,7 @@ function bindEvents() {
         }
         fetchCameras();
     });
-    document.getElementById('btn-swap-cams').addEventListener('click', () => {
-        const current = localStorage.getItem('swapCameraSources') === 'true';
-        localStorage.setItem('swapCameraSources', !current);
-        fetchCameras();
-    });
+
     document.getElementById('btn-toggle-view').addEventListener('click', () => {
         viewMode = (viewMode === 'fit') ? 'native' : 'fit';
         const container = document.getElementById('canvas-container');
@@ -889,17 +914,25 @@ function renderDisplayList() {
         return;
     }
     list.innerHTML = window.appState.displays.map(d => {
-        const currentCam = window.appState.cameras.find(c => c.id === d.camId);
-        const isActive = d.camId === window.appState.selectedCameraId;
+        // Find if the configured camera (by name) is currently available
+        const configuredCameraName = d.camera_name || 'Unknown Camera';
+        const isCameraConnected = window.appState.cameras.some(c => {
+            // Fuzzy match: check if camera names are similar
+            const cLower = c.name.toLowerCase();
+            const dLower = configuredCameraName.toLowerCase();
+            return cLower === dLower ||
+                cLower.includes(dLower.split('(')[0].trim().toLowerCase()) ||
+                dLower.includes(cLower.split('(')[0].trim().toLowerCase());
+        });
+
         const isSelected = d.id === activeDisplayId;
-        const displayName = currentCam ? currentCam.name : (d.camera_name || 'Camera Unknown');
 
         return `
             <div class="list-item ${isSelected ? 'selected' : ''}" onclick="selectDisplayFromList('${d.id}')">
-                <div style="width:10px; height:10px; background:${currentCam ? 'var(--status-active)' : 'var(--status-off)'}; border-radius:50%;"></div>
+                <div style="width:10px; height:10px; background:${isCameraConnected ? 'var(--status-active)' : 'var(--status-off)'}; border-radius:50%;"></div>
                 <div style="flex:1;">
                     <div style="font-weight:500;">${d.name}</div>
-                    <div style="font-size:0.75rem; color:var(--text-muted);">${displayName}</div>
+                    <div style="font-size:0.75rem; color:var(--text-muted);">${configuredCameraName}</div>
                 </div>
             </div>
         `;

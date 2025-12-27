@@ -93,9 +93,6 @@ class MonitorSystem:
         self.processor.close()
 
     def _capture_loop(self):
-        # 1. Initial Camera Reconciliation
-        # Ensure we map displays to the CORRECT hardware ID based on name, 
-        # avoiding the "Index 0 is now MacBook" issue when HP (Index 0) is unplugged.
         import re
 
         def normalize_name(n):
@@ -103,55 +100,68 @@ class MonitorSystem:
             base = re.sub(r'\s*\(Device \d+\)$', '', n, flags=re.IGNORECASE).strip().lower()
             return base
 
-        print("[MonitorSystem] Reconciling camera mappings...")
-        current_cams = self.processor.discover_cameras() # Uses system_profiler
-        
-        # Build lookup map
+        # Reconcile cameras once at startup
+        print("[MonitorSystem] ===== CAMERA RECONCILIATION START =====")
+        current_cams = self.processor.discover_cameras()
         cams_by_norm = {}
         for c in current_cams:
-            norm = normalize_name(c['name']) # e.g. "macbook pro camera"
+            norm = normalize_name(c['name'])
             cams_by_norm[norm] = c
-            
-        print(f"[MonitorSystem] Detected Cameras (Normalized): {list(cams_by_norm.keys())}")
+            print(f"[MonitorSystem] Detected: ID={c['id']}, Name='{c['name']}', Normalized='{norm}'")
+        
+        print(f"[MonitorSystem] Total cameras detected: {len(current_cams)}")
+        print(f"[MonitorSystem] Display count: {len(self.loader.displays)}")
         
         for d in self.loader.displays:
             saved_full_name = d.get('camera_name')
+            current_cam_id = d.get('camId')
+            print(f"\n[MonitorSystem] Processing display '{d.get('name')}':")
+            print(f"  - Configured camera_name: '{saved_full_name}'")
+            print(f"  - Current camId: {current_cam_id}")
+            
             if saved_full_name:
-                saved_norm = normalize_name(saved_full_name) # e.g. "macbook camera"
+                saved_norm = normalize_name(saved_full_name)
+                print(f"  - Normalized config name: '{saved_norm}'")
                 matched_cam = None
                 
-                # 1. Try exact normalized match
+                # Exact match
                 if saved_norm in cams_by_norm:
                     matched_cam = cams_by_norm[saved_norm]
+                    print(f"  - EXACT MATCH found!")
                 
-                # 2. Try partial/fuzzy match
+                # Fuzzy match
                 if not matched_cam:
                     for c_norm, c_obj in cams_by_norm.items():
-                        # "macbook camera" in "macbook pro camera" or vice versa
                         if saved_norm in c_norm or c_norm in saved_norm:
                             matched_cam = c_obj
+                            print(f"  - FUZZY MATCH found: '{c_norm}' <-> '{saved_norm}'")
                             break
-                        
-                        # Specific keyword fallbacks
                         if "macbook" in saved_norm and "macbook" in c_norm:
-                             matched_cam = c_obj
-                             break
-                        if "webcam" in saved_norm and "webcam" in c_norm: # Common for external
-                             matched_cam = c_obj
-                             break
-                             
+                            matched_cam = c_obj
+                            print(f"  - KEYWORD MATCH (macbook): '{c_norm}' <-> '{saved_norm}'")
+                            break
+                        if "webcam" in saved_norm and "webcam" in c_norm:
+                            matched_cam = c_obj
+                            print(f"  - KEYWORD MATCH (webcam): '{c_norm}' <-> '{saved_norm}'")
+                            break
+                
                 if matched_cam:
-                     new_id = matched_cam['id']
-                     if d.get('camId') != new_id:
-                         print(f"[MonitorSystem] Remapping display '{d.get('name')}' from {d.get('camId')} to {new_id} ({matched_cam['name']})")
-                         d['camId'] = new_id
-                     d['missing_camera'] = False
+                    new_id = matched_cam['id']
+                    print(f"  - Matched camera ID: {new_id} ('{matched_cam['name']}')")
+                    if d.get('camId') != new_id:
+                        print(f"  - *** REMAPPING: {current_cam_id} -> {new_id} ***")
+                        d['camId'] = new_id
+                    else:
+                        print(f"  - Already correct, no remapping needed")
+                    d['missing_camera'] = False
                 else:
-                    # Name not found. 
-                    print(f"[MonitorSystem] Camera '{saved_full_name}' (norm: {saved_norm}) NOT FOUND. Marking offline.")
+                    print(f"  - *** NO MATCH FOUND - MARKING OFFLINE ***")
                     d['missing_camera'] = True
             else:
-                 d['missing_camera'] = False
+                print(f"  - No camera_name configured, skipping")
+                d['missing_camera'] = False
+        
+        print("[MonitorSystem] ===== CAMERA RECONCILIATION COMPLETE =====\n")
 
         frame_idx = 0
         while self.run_flag:
