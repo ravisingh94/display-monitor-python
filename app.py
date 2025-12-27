@@ -99,9 +99,21 @@ class MonitorSystem:
         
         # State
         self.latest_frames = {} # { display_id: jpeg_bytes }
+        self.latest_frames_raw = {} # { display_id: frame_numpy }
         self.latest_status = {} # { display_id: { status, metrics } }
         self.engines = {}
         self.thread = None
+        
+        # Session / Recording
+        self.sess_id = None
+        self.sess_path = None
+        self.sess_log_path = None
+        self.sess_video = None
+        self.sess_start_time = 0
+        self.sess_lock = threading.Lock()
+        
+        # Hardware Cache
+        self.cached_hardware_cams = None
         
         # Init Engines with OCR
         reader = get_ocr_reader()
@@ -113,12 +125,11 @@ class MonitorSystem:
         # Default 5s if not set
         engine_config['ocr_interval'] = engine_config.get('ocr_interval', 5.0) 
         
-        # Load pattern config if exists on top level
-        # (cli_engine expects it in config dict)
-        
         for d in self.loader.displays:
             self.engines[d['id']] = DisplayStatusEngine(engine_config)
             
+        # Perform initial reconciliation
+        self.reconcile_cameras()
         print(f"[MonitorSystem] Initialized {len(self.engines)} display engines.")
 
     def start(self):
@@ -130,93 +141,173 @@ class MonitorSystem:
         self.run_flag = False
         if self.thread:
             self.thread.join()
+        # Ensure session is closed
+        self.stop_continuous_monitor()
         # Release hardware
         self.processor.close()
 
-    def _capture_loop(self):
+    def start_continuous_monitor(self):
+        with self.sess_lock:
+            if self.sess_id:
+                return self.sess_id, self.sess_path
+            
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            self.sess_id = f"session_{ts}"
+            self.sess_path = os.path.join(os.getcwd(), "sessions", self.sess_id)
+            os.makedirs(self.sess_path, exist_ok=True)
+            
+            self.sess_log_path = os.path.join(self.sess_path, "events.log")
+            self.sess_start_time = time.time()
+            
+            self.log_event("SESSION_STARTED", f"Continuous monitoring started for session {self.sess_id}")
+            print(f"[MonitorSystem] Started continuous monitor: {self.sess_path}")
+            return self.sess_id, self.sess_path
+
+    def stop_continuous_monitor(self):
+        with self.sess_lock:
+            if not self.sess_id:
+                return None
+            
+            path = self.sess_path
+            self.log_event("SESSION_STOPPED", f"Continuous monitoring stopped for session {self.sess_id}")
+            
+            if self.sess_video:
+                self.sess_video.release()
+                self.sess_video = None
+            
+            self.sess_id = None
+            self.sess_path = None
+            print(f"[MonitorSystem] Stopped continuous monitor: {path}")
+            return path
+
+    def log_event(self, event_type, message, display_name=None):
+        if not self.sess_log_path:
+            return
+        
+        ts = time.strftime("%Y-%m-%d %H:%M:%S")
+        context = f"[{display_name}] " if display_name else ""
+        log_line = f"[{ts}] {context}{event_type}: {message}\n"
+        
+        try:
+            with open(self.sess_log_path, 'a') as f:
+                f.write(log_line)
+        except Exception as e:
+            print(f"[MonitorSystem] Log error: {e}")
+
+    def _get_tiled_frame(self):
+        """Creates a tiled view of all displays for recording"""
+        with self.lock:
+            display_frames = list(self.latest_frames_raw.values())
+        
+        if not display_frames:
+            return None
+        
+        # Target tile size (e.g. 640x360)
+        t_w, t_h = 640, 360
+        count = len(display_frames)
+        cols = int(np.ceil(np.sqrt(count)))
+        rows = int(np.ceil(count / cols))
+        
+        canvas = np.zeros((rows * t_h, cols * t_w, 3), dtype=np.uint8)
+        
+        for i, frame in enumerate(display_frames):
+            r = i // cols
+            c = i % cols
+            # Resize to fit tile
+            resized = cv2.resize(frame, (t_w, t_h))
+            canvas[r*t_h:(r+1)*t_h, c*t_w:(c+1)*t_w] = resized
+            
+        return canvas
+
+    def _reconcile_cameras(self, force_discovery=False):
+        """Matches configured camera names to current hardware IDs"""
         import re
         logger = logging.getLogger('MonitorSystem')
 
         def normalize_name(n):
-            # Remove (Device X) suffix to compare base names
             base = re.sub(r'\s*\(Device \d+\)$', '', n, flags=re.IGNORECASE).strip().lower()
             return base
 
-        # Reconcile cameras once at startup
         logger.info("=" * 50)
-        logger.info("CAMERA RECONCILIATION START")
+        logger.info(f"CAMERA RECONCILIATION START (Force={force_discovery})")
         logger.info("=" * 50)
         
-        current_cams = self.processor.discover_cameras()
+        if force_discovery or not self.cached_hardware_cams:
+            self.cached_hardware_cams = self.processor.discover_cameras()
+            logger.info(f"Hardware camera discovery performed: {len(self.cached_hardware_cams)} found.")
+        
+        current_cams = self.cached_hardware_cams
         cams_by_norm = {}
         for c in current_cams:
             norm = normalize_name(c['name'])
             cams_by_norm[norm] = c
-            logger.debug(f"Detected: ID={c['id']}, Name='{c['name']}', Normalized='{norm}'")
-        
-        logger.info(f"Total cameras detected: {len(current_cams)}")
-        logger.info(f"Display count: {len(self.loader.displays)}")
         
         for d in self.loader.displays:
             saved_full_name = d.get('camera_name')
-            current_cam_id = d.get('camId')
-            logger.debug(f"Processing display '{d.get('name')}':")
-            logger.debug(f"  - Configured camera_name: '{saved_full_name}'")
-            logger.debug(f"  - Current camId: {current_cam_id}")
-            
             if saved_full_name:
                 saved_norm = normalize_name(saved_full_name)
-                logger.debug(f"  - Normalized config name: '{saved_norm}'")
                 matched_cam = None
                 
-                # Exact match
                 if saved_norm in cams_by_norm:
                     matched_cam = cams_by_norm[saved_norm]
-                    logger.debug(f"  - EXACT MATCH found!")
                 
-                # Fuzzy match
                 if not matched_cam:
                     for c_norm, c_obj in cams_by_norm.items():
                         if saved_norm in c_norm or c_norm in saved_norm:
                             matched_cam = c_obj
-                            logger.debug(f"  - FUZZY MATCH found: '{c_norm}' <-> '{saved_norm}'")
                             break
                         if "macbook" in saved_norm and "macbook" in c_norm:
                             matched_cam = c_obj
-                            logger.debug(f"  - KEYWORD MATCH (macbook): '{c_norm}' <-> '{saved_norm}'")
                             break
                         if "webcam" in saved_norm and "webcam" in c_norm:
                             matched_cam = c_obj
-                            logger.debug(f"  - KEYWORD MATCH (webcam): '{c_norm}' <-> '{saved_norm}'")
                             break
                 
                 if matched_cam:
                     new_id = matched_cam['id']
-                    logger.debug(f"  - Matched camera ID: {new_id} ('{matched_cam['name']}')")
-                    if d.get('camId') != new_id:
-                        logger.info(f"REMAPPING: Display '{d.get('name')}' from Camera {current_cam_id} -> {new_id} ({matched_cam['name']})")
+                    # Update both ID and camera_name to stay in sync with hardware
+                    if d.get('camId') != new_id or d.get('camera_name') != matched_cam['name']:
+                        logger.info(f"REMAPPING: '{d.get('name')}' -> {new_id} ('{matched_cam['name']}')")
                         d['camId'] = new_id
-                    else:
-                        logger.debug(f"  - Already correct, no remapping needed")
+                        d['camera_name'] = matched_cam['name']
                     d['missing_camera'] = False
                 else:
-                    logger.warning(f"Camera '{saved_full_name}' NOT FOUND for display '{d.get('name')}'. Marking offline.")
+                    logger.warning(f"Camera '{saved_full_name}' NOT FOUND for display '{d.get('name')}'.")
                     d['missing_camera'] = True
             else:
-                logger.debug(f"  - No camera_name configured for display '{d.get('name')}', skipping")
                 d['missing_camera'] = False
         
         logger.info("CAMERA RECONCILIATION COMPLETE")
         logger.info("=" * 50)
 
+    def reconcile_cameras(self, force_discovery=False):
+        """Thread-safe public reconciliation"""
+        with self.lock:
+            self._reconcile_cameras(force_discovery=force_discovery)
+
+    def refresh_config(self, force_discovery=False):
+        """Reloads config from disk and reapplies mappings safely"""
+        with self.lock:
+            self.loader.load_config()
+            self._reconcile_cameras(force_discovery=force_discovery)
+            # Update specific engine configs if needed (optional)
+            print(f"[MonitorSystem] Configuration refreshed and reconciled (Force Discovery={force_discovery}).")
+
+    def _capture_loop(self):
+        logger = logging.getLogger('MonitorSystem')
         frame_idx = 0
         while self.run_flag:
             try:
                 # Group displays by camera to optimize capture
+                # Use lock to snapshot the list to avoid race with config reloads
+                with self.lock:
+                    active_displays = copy.deepcopy(self.loader.displays)
+                
                 cam_displays = {}
-                for d in self.loader.displays:
+                for d in active_displays:
                     if d.get('missing_camera', False):
                         # Force status update to NO SIGNAL for missing cams
+                        # (Still use lock for shared state latest_status)
                         with self.lock:
                              self.latest_status[d['id']] = {
                                 'id': d['id'],
@@ -289,6 +380,12 @@ class MonitorSystem:
                         # Update State
                         with self.lock:
                             self.latest_frames[did] = jpeg_bytes
+                            self.latest_frames_raw[did] = disp_frame
+                            
+                            # Check for status changes to log
+                            prev_data = self.latest_status.get(did)
+                            prev_status = prev_data.get('status') if prev_data else None
+                            
                             self.latest_status[did] = {
                                 'id': did,
                                 'name': d.get('name', did),
@@ -296,6 +393,32 @@ class MonitorSystem:
                                 'status': status,
                                 'metrics': metrics
                             }
+                            
+                            if status != prev_status and self.sess_id:
+                                self.log_event("STATUS_CHANGE", f"Changed from {prev_status} to {status}", display_name=d.get('name'))
+                            
+                            if metrics.get('glitch') and self.sess_id:
+                                g_types = metrics.get('glitch_types', [])
+                                self.log_event("GLITCH_DETECTED", f"Types: {g_types}", display_name=d.get('name'))
+                            
+                            if metrics.get('ocr_match') and self.sess_id:
+                                ocr_text = metrics.get('ocr_match')
+                                self.log_event("OCR_MATCH", f"Negative text detected: {ocr_text}", display_name=d.get('name'))
+
+                # Handling recording in the loop
+                if self.sess_id:
+                    tiled = self._get_tiled_frame()
+                    if tiled is not None:
+                        with self.sess_lock:
+                            if self.sess_video is None:
+                                h, w = tiled.shape[:2]
+                                v_path = os.path.join(self.sess_path, "combined_monitoring.mp4")
+                                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                                self.sess_video = cv2.VideoWriter(v_path, fourcc, 10.0, (w, h))
+                            
+                            # Write frame roughly every 100ms
+                            if frame_idx % 3 == 0: # Assuming ~30fps, write every 3rd frame for 10fps record
+                                self.sess_video.write(tiled)
                 
                 # Faster capture loop (~30 FPS potential)
                 time.sleep(0.01)
@@ -404,8 +527,8 @@ def stop_monitor_system():
 @app.route('/api/config/load')
 def load_config():
     """Returns display layout config"""
-    # Force reload from disk to ensure latest config is served
-    monitor_sys.loader.load_config()
+    # Force reload and reconcile to ensure accuracy
+    monitor_sys.refresh_config()
     return jsonify({'displays': monitor_sys.loader.displays})
 
 @app.route('/api/config/save', methods=['POST'])
@@ -422,8 +545,8 @@ def save_config():
         with open('display_config.yaml', 'w') as f:
             yaml.dump(yaml_data, f, default_flow_style=False)
             
-        # Reload monitor system with new config
-        monitor_sys.loader.load_config()
+        # Reload and reconcile monitor system with new config
+        monitor_sys.refresh_config()
         return jsonify({'status': 'success'})
         
     except Exception as e:
@@ -850,16 +973,136 @@ def stream_analysis(session_id):
     
     return Response(generate(), mimetype='text/event-stream')
 
-if __name__ == '__main__':
-    # Initialize logging
-    import yaml
-    with open('config.yaml', 'r') as f:
-        config = yaml.safe_load(f)
-    setup_logging(config)
+# --- New Management APIs ---
+
+@app.route('/api/displays/list')
+def api_list_displays():
+    """Returns a list of all configured displays"""
+    # Force reload and reconcile to ensure accuracy
+    monitor_sys.refresh_config()
+    return jsonify({
+        'displays': [
+            {'id': d['id'], 'name': d.get('name'), 'camera_name': d.get('camera_name')}
+            for d in monitor_sys.loader.displays
+        ]
+    })
+
+def find_display(name_or_id):
+    """Helper to find display by name or ID"""
+    with monitor_sys.lock:
+        # Try ID match
+        if name_or_id in monitor_sys.latest_status:
+            return name_or_id
+        # Try Name match
+        for did, status in monitor_sys.latest_status.items():
+            if status.get('name') == name_or_id:
+                return did
+    return None
+
+@app.route('/api/displays/status')
+def api_get_status():
+    """Query real-time status by name or ID"""
+    name = request.args.get('name')
+    did_input = request.args.get('id')
     
+    target_id = find_display(did_input or name)
+    if not target_id:
+        return jsonify({'error': 'Display not found'}), 404
+    
+    with monitor_sys.lock:
+        return jsonify(monitor_sys.latest_status[target_id])
+
+@app.route('/api/displays/get-frame')
+def api_get_frame():
+    """Returns JPEG of current frame for specified display"""
+    name = request.args.get('name')
+    did_input = request.args.get('id')
+    
+    target_id = find_display(did_input or name)
+    if not target_id:
+        return "Display not found", 404
+        
+    with monitor_sys.lock:
+        frame = monitor_sys.latest_frames.get(target_id)
+        
+    if frame:
+        return Response(frame, mimetype='image/jpeg')
+    return "No Frame", 404
+
+@app.route('/api/displays/get-combined')
+def api_get_combined():
+    """Returns a tiled JPEG of all active displays"""
+    tiled = monitor_sys._get_tiled_frame()
+    if tiled is None:
+        return "No displays active", 404
+    
+    ret, jpeg = cv2.imencode('.jpg', tiled, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+    if not ret:
+        return "Encoding Error", 500
+        
+    return Response(jpeg.tobytes(), mimetype='image/jpeg')
+
+@app.route('/api/monitor/continuous/start', methods=['POST'])
+def api_monitor_start():
+    sid, path = monitor_sys.start_continuous_monitor()
+    return jsonify({
+        'status': 'started',
+        'session_id': sid,
+        'path': path
+    })
+
+@app.route('/api/monitor/continuous/stop', methods=['POST'])
+def api_monitor_stop():
+    path = monitor_sys.stop_continuous_monitor()
+    if not path:
+        return jsonify({'status': 'not_running'}), 200
+    return jsonify({
+        'status': 'stopped',
+        'path': path
+    })
+
+@app.route('/api/monitor/continuous/timer', methods=['POST'])
+def api_monitor_timer():
+    """Starts monitoring for X seconds and returns result summary"""
+    seconds = request.args.get('seconds', type=int)
+    if not seconds:
+        return jsonify({'error': 'Missing seconds parameter'}), 400
+    
+    sid, path = monitor_sys.start_continuous_monitor()
+    
+    # Wait for X seconds
+    time.sleep(seconds)
+    
+    # Stop and return
+    final_path = monitor_sys.stop_continuous_monitor()
+    
+    return jsonify({
+        'status': 'completed',
+        'session_id': sid,
+        'path': final_path,
+        'duration': seconds
+    })
+
+if __name__ == '__main__':
+    # Initialize directory for sessions
+    os.makedirs(os.path.join(os.getcwd(), 'sessions'), exist_ok=True)
+    
+    # Initialize logging
+    try:
+        with open('config.yaml', 'r') as f:
+            config_data = yaml.safe_load(f)
+        setup_logging(config_data)
+    except Exception as e:
+        print(f"Logging setup failed: {e}")
+        logging.basicConfig(level=logging.INFO)
+
     logger = logging.getLogger(__name__)
     logger.info("=" * 60)
-    logger.info("Display Monitor Application Starting")
+    logger.info("Display Monitor Application Starting (Advanced API Mode)")
     logger.info("=" * 60)
     
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    # Start the monitor system by default if running directly
+    monitor_sys.start()
+    
+    # Use 5001 as default port (often cleaner on Mac)
+    app.run(host='0.0.0.0', port=5001, debug=False)
