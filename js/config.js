@@ -115,6 +115,7 @@ async function loadConfig() {
                 display.rotation = parseInt(display.rotation) || 0;
             });
             window.appState.displays = savedDisplays;
+            window.appState.cameraConfigs = data.cameras || {};
         }
     } catch (error) {
         console.error('Failed to load config:', error);
@@ -150,13 +151,17 @@ async function saveConfig() {
                 h: Math.max(...corners.map(c => c.y)) - Math.min(...corners.map(c => c.y)),
                 rotation: d.rotation || 0,
                 enablePerspective: d.enablePerspective || false
+                // preferred_resolution removed from display object
             };
         });
 
         const response = await fetch('/api/config/save', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(displaysToSave)
+            body: JSON.stringify({
+                displays: displaysToSave,
+                cameras: window.appState.cameraConfigs
+            })
         });
 
         const result = await response.json();
@@ -237,7 +242,8 @@ async function fetchCameras() {
                 name: hc.name,
                 hardware_id: hc.hardware_id,
                 deviceId: browserMatch ? browserMatch.deviceId : null, // for getUserMedia preview
-                type: 'stream'
+                type: 'stream',
+                resolutions: hc.resolutions || []
             };
         });
 
@@ -302,6 +308,18 @@ function renderConfigUI(container) {
                     </div>
                     <div class="camera-list" id="camera-list"></div>
                 </div>
+                <div class="sidebar-section" id="camera-settings-panel" style="display:none; background:rgba(255,255,255,0.03); border-left: 2px solid var(--accent);">
+                    <h3>Camera Settings</h3>
+                    <div class="form-group">
+                        <label class="form-label" style="font-size:0.75rem;">Resolution</label>
+                        <select class="form-input" id="cam-resolution-select" style="font-size:0.8rem; padding:4px;">
+                            <option value="">Default (Auto)</option>
+                        </select>
+                    </div>
+                    <div style="font-size:0.65rem; color:var(--text-muted); margin-top:4px;">
+                        💡 Applies to all regions on this camera.
+                    </div>
+                </div>
                 <div class="sidebar-section" style="flex:1; overflow-y:auto;">
                     <h3>Defined Displays</h3>
                     <div class="display-list" id="display-list"></div>
@@ -341,6 +359,12 @@ function renderConfigUI(container) {
                     <div class="form-group">
                         <label class="form-label">Rotation (°)</label>
                         <input type="number" class="form-input" id="prop-rotation" min="0" max="359">
+                    </div>
+                    <div class="form-group" style="display:none;">
+                        <label class="form-label">Camera Resolution</label>
+                        <select class="form-input" id="prop-resolution">
+                            <option value="">Default (Auto)</option>
+                        </select>
                     </div>
                     <div class="form-group"><label class="toggle-switch"><input type="checkbox" id="prop-perspective"><span>Enable Perspective Correction</span></label></div>
                     <div style="display:flex; gap:0.5rem; margin-top:1rem;">
@@ -740,6 +764,15 @@ function bindEvents() {
             d.name = document.getElementById('prop-name').value;
             d.rotation = parseInt(document.getElementById('prop-rotation').value);
             d.enablePerspective = document.getElementById('prop-perspective').checked;
+            d.preferred_resolution = document.getElementById('prop-resolution').value;
+
+            // Sync this resolution to all displays sharing the same camera
+            window.appState.displays.forEach(other => {
+                if ((other.hardware_id || other.camId) === (d.hardware_id || d.camId)) {
+                    other.preferred_resolution = d.preferred_resolution;
+                }
+            });
+
             renderOverlays(); renderDisplayList();
 
             // Provide feedback
@@ -847,9 +880,46 @@ window.selectCamera = function (hwId) {
     const msg = document.getElementById('placeholder-msg');
     const toolbar = document.getElementById('main-toolbar');
 
+    const camSettings = document.getElementById('camera-settings-panel');
+    const camResSelect = document.getElementById('cam-resolution-select');
+
     img.style.display = 'none';
     video.style.display = 'none';
+    if (camSettings) camSettings.style.display = 'none';
     stopActiveStream();
+
+    if (cam.type === 'stream') {
+        if (camSettings) {
+            camSettings.style.display = 'block';
+            if (camResSelect) {
+                camResSelect.innerHTML = '<option value="">Default (Auto)</option>';
+                (cam.resolutions || []).forEach(res => {
+                    const opt = document.createElement('option');
+                    opt.value = res;
+                    opt.innerText = res;
+                    camResSelect.appendChild(opt);
+                });
+
+                // Set current value from loaded config using hardware_id
+                const hwId = cam.hardware_id || cam.id;
+                const savedConf = window.appState.cameraConfigs[hwId] || {};
+                camResSelect.value = savedConf.resolution || '';
+
+                camResSelect.onchange = (e) => {
+                    const newRes = e.target.value;
+                    if (!window.appState.cameraConfigs[hwId]) {
+                        window.appState.cameraConfigs[hwId] = {};
+                    }
+                    window.appState.cameraConfigs[hwId].resolution = newRes;
+                    console.log(`Resolution updated for camera ${cam.name} -> ${newRes || 'Default'}`);
+
+                    // Re-request stream with new resolution
+                    stopActiveStream();
+                    startCameraStream(cam, newRes);
+                };
+            }
+        }
+    }
 
     if (cam.type === 'stream') {
         if (!cam.deviceId) {
@@ -861,25 +931,12 @@ window.selectCamera = function (hwId) {
             return;
         }
 
-        const constraintId = cam.deviceId;
-        navigator.mediaDevices.getUserMedia({ video: { deviceId: { exact: constraintId } } })
-            .then(stream => {
-                video.srcObject = stream;
-                video.style.display = 'block';
-                msg.style.display = 'none';
-                toolbar.style.display = 'flex';
-                video.onloadedmetadata = () => {
-                    applyZoom(1.0);
-                    renderDisplayList();
-                };
-            })
-            .catch(err => {
-                console.error('Failed to access camera:', err);
-                msg.innerText = 'Error accessing camera. Please check permissions and device availability.';
-                msg.style.display = 'block';
-                renderOverlays();
-                renderDisplayList();
-            });
+        // Determine initial resolution from config
+        const currentHwId = cam.hardware_id || cam.id;
+        const savedConf = window.appState.cameraConfigs[currentHwId] || {};
+        const initialRes = savedConf.resolution || null;
+
+        startCameraStream(cam, initialRes);
     } else {
         img.src = cam.src;
         img.onload = () => {
@@ -891,6 +948,43 @@ window.selectCamera = function (hwId) {
         };
     }
 };
+
+function startCameraStream(cam, resolutionStr) {
+    const video = document.getElementById('config-video-layer');
+    const msg = document.getElementById('placeholder-msg');
+    const toolbar = document.getElementById('main-toolbar');
+    const constraintId = cam.deviceId;
+
+    let constraints = {
+        video: {
+            deviceId: { exact: constraintId }
+        }
+    };
+
+    if (resolutionStr && resolutionStr.includes('x')) {
+        const [w, h] = resolutionStr.split('x').map(Number);
+        constraints.video.width = { ideal: w };
+        constraints.video.height = { ideal: h };
+    }
+
+    navigator.mediaDevices.getUserMedia(constraints)
+        .then(stream => {
+            video.srcObject = stream;
+            video.style.display = 'block';
+            msg.style.display = 'none';
+            toolbar.style.display = 'flex';
+            video.onloadedmetadata = () => {
+                applyZoom(1.0);
+                renderDisplayList();
+            };
+        })
+        .catch(err => {
+            console.error('Failed to access camera:', err);
+            applyZoom(1.0);
+            renderDisplayList();
+            renderDisplayList();
+        });
+}
 
 function startAddDisplayMode() {
     saveState();
@@ -978,9 +1072,27 @@ function openPropertyPanel(d) {
     const panel = document.getElementById('property-panel');
     if (!panel) return;
     panel.style.display = 'block';
-    document.getElementById('prop-name').value = d.name;
-    document.getElementById('prop-rotation').value = d.rotation;
-    document.getElementById('prop-perspective').checked = d.enablePerspective;
+    document.getElementById('prop-name').value = d.name || '';
+    document.getElementById('prop-rotation').value = d.rotation || 0;
+    document.getElementById('prop-perspective').checked = d.enablePerspective || false;
+
+    // Populate resolution dropdown
+    const resSelect = document.getElementById('prop-resolution');
+    if (resSelect) {
+        resSelect.innerHTML = '<option value="">Default (Auto)</option>';
+
+        // Find camera by hardware_id or camId
+        const cam = window.appState.cameras.find(c => (c.hardware_id === (d.hardware_id || d.camId)) || (c.id === d.camId));
+        if (cam && cam.resolutions) {
+            cam.resolutions.forEach(res => {
+                const opt = document.createElement('option');
+                opt.value = res;
+                opt.innerText = res;
+                resSelect.appendChild(opt);
+            });
+        }
+        resSelect.value = d.preferred_resolution || '';
+    }
 }
 
 function renderCameraList() {

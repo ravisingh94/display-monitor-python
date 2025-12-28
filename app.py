@@ -425,6 +425,8 @@ class MonitorSystem:
                     d['hardware_id'] = hw_id
                     d['camera_name'] = hw_name # Keep in sync
                     d['missing_camera'] = False
+                    # Preserve preferred_resolution if it exists in the config
+                    # d['preferred_resolution'] = d.get('preferred_resolution') 
             else:
                 logger.warning(f"MISSING GROUP: Source '{key}' NOT FOUND.")
                 for d in group:
@@ -441,10 +443,11 @@ class MonitorSystem:
     def refresh_config(self, force_discovery=False):
         """Reloads config from disk and reapplies mappings safely"""
         with self.lock:
+            # Release all cameras to allow them to be re-opened with new resolutions
+            self.processor.close()
             self.loader.load_config()
             self._reconcile_cameras(force_discovery=force_discovery)
-            # Update specific engine configs if needed (optional)
-            print(f"[MonitorSystem] Configuration refreshed and reconciled (Force Discovery={force_discovery}).")
+            print(f"[MonitorSystem] Configuration refreshed and reconciled. All cameras re-initialized.")
 
     def _capture_loop(self):
         logger = logging.getLogger('MonitorSystem')
@@ -486,7 +489,28 @@ class MonitorSystem:
                 cids = list(cam_displays.keys())
                 for cid in cids:
                     displays = cam_displays[cid]
-                    frame = self.processor.read_frame(cid)
+                    
+                    # Determine target resolution if specified in config for this camera group
+                    # Determine target resolution from camera config
+                    target_res = None
+                    # Find hardware ID for this camId
+                    representative = displays[0] if displays else None
+                    hw_id = representative.get('hardware_id') if representative else None
+                    
+                    if hw_id:
+                        cam_conf = self.loader.camera_configs.get(hw_id, {})
+                        res_str = cam_conf.get('resolution')
+                        if res_str and 'x' in res_str:
+                             try:
+                                w, h = map(int, res_str.split('x'))
+                                target_res = (w, h)
+                             except:
+                                pass
+                        
+                        if frame_idx % 100 == 0:
+                             print(f"[Debug] Cam {cid} HW_ID: {hw_id} Target Res: {target_res}")
+
+                    frame = self.processor.read_frame(cid, target_res=target_res)
                     
                     # Debug log every 500 frames (~5s)
                     if frame_idx % 500 == 0:
@@ -728,18 +752,29 @@ def load_config():
     """Returns display layout config"""
     # Force reload and reconcile to ensure accuracy
     monitor_sys.refresh_config()
-    return jsonify({'displays': monitor_sys.loader.displays})
+    return jsonify({
+        'displays': monitor_sys.loader.displays,
+        'cameras': monitor_sys.loader.camera_configs # Send camera configs too
+    })
 
 @app.route('/api/config/save', methods=['POST'])
 def save_config():
     """Saves display layout config"""
     try:
         data = request.json
-        if not isinstance(data, list):
-            return jsonify({'error': 'Invalid format, expected list'}), 400
+        if not data:
+             return jsonify({'error': 'Invalid format, data required'}), 400
+
+        # Support both legacy list and new dict format
+        if isinstance(data, list):
+             displays = data
+             cameras = {}
+        else:
+             displays = data.get('displays', [])
+             cameras = data.get('cameras', {})
         
         # Structure for YAML
-        yaml_data = {'displays': data}
+        yaml_data = {'displays': displays, 'cameras': cameras}
         
         with open('display_config.yaml', 'w') as f:
             yaml.dump(yaml_data, f, default_flow_style=False)

@@ -6,6 +6,7 @@ import { initAnalysisMode } from './analysis.js';
 // Global App State
 window.appState = {
     cameras: [],
+    cameraConfigs: {},
     selectedCameraId: null,
     displays: []
 };

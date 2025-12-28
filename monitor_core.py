@@ -235,16 +235,20 @@ class CLILoader:
         self.load_config()
 
     def load_config(self):
-        self.displays = self._load_displays()
+        self.displays, self.camera_configs = self._load_displays_and_cameras()
         self.monitor_config = self._load_monitor_config()
-        logger.debug(f"[CLILoader] Loaded {len(self.displays)} displays from {self.display_config_path}")
+        logger.debug(f"[CLILoader] Loaded {len(self.displays)} displays and {len(self.camera_configs)} camera configs from {self.display_config_path}")
 
-    def _load_displays(self):
+    def _load_displays_and_cameras(self):
         if not os.path.exists(self.display_config_path):
-            return []
+            return [], {}
         with open(self.display_config_path, 'r') as f:
             data = yaml.safe_load(f)
-            displays = data.get('displays', []) if data else []
+            if not data:
+                return [], {}
+            
+            displays = data.get('displays', [])
+            cameras = data.get('cameras', {})
             
             # Calculate global bounds for resolution detection hints
             self.max_x = 0
@@ -257,7 +261,7 @@ class CLILoader:
                 self.max_x = max(self.max_x, d.get('x', 0) + d.get('w', 0))
                 self.max_y = max(self.max_y, d.get('y', 0) + d.get('h', 0))
             
-            return displays
+            return displays, cameras
 
     def _load_monitor_config(self):
         if not os.path.exists(self.monitor_config_path):
@@ -299,7 +303,7 @@ class ImageProcessor:
         self.caps = {}
         self._failed_caps = {} # Map ID -> timestamp of last failure
 
-    def get_cap(self, cam_id):
+    def get_cap(self, cam_id, target_res=None):
         if cam_id in self.caps:
             return self.caps[cam_id]
         
@@ -353,8 +357,30 @@ class ImageProcessor:
                 logger.debug(f"[ImageProcessor] Error in {desc} attempt for {idx}: {e}")
             return None
 
+        cap = None
+
+        # Attempt 0: User-preferred resolution
+        if not cap and target_res:
+            def config_target(c):
+                try:
+                    w, h = target_res
+                    c.set(cv2.CAP_PROP_FRAME_WIDTH, w)
+                    c.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
+                except Exception as e:
+                    logger.debug(f"[ImageProcessor] Failed to set preferred resolution {target_res}: {e}")
+            
+            print(f"[Debug] Attempting to open camera {idx} with target {target_res}")
+            cap = _try_open(config_target, desc=f"Preferred: {target_res}")
+            if cap:
+                 actual_w = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+                 actual_h = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                 print(f"[Debug] SUCCESS opening camera {idx} with {target_res}. Actual: {actual_w}x{actual_h}")
+            else:
+                 print(f"[Debug] FAILED opening camera {idx} with {target_res}, falling back")
+
         # Attempt 1: Default (OS decides)
-        cap = _try_open(desc="Attempt 1: Default")
+        if not cap:
+            cap = _try_open(desc="Attempt 1: Default")
         
         # Attempt 2: Force MJPEG @ 720p (Good for bandwidth)
         if not cap:
@@ -415,19 +441,20 @@ class ImageProcessor:
         for i in range(max_cameras):
             cap = cv2.VideoCapture(i)
             if cap.isOpened():
-                supported_count = 0
+                supported_res = []
                 for w_req, h_req in common_resolutions:
                     cap.set(cv2.CAP_PROP_FRAME_WIDTH, w_req)
                     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h_req)
                     w_act = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
                     h_act = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
                     if w_act == w_req and h_act == h_req:
-                        supported_count += 1
+                        supported_res.append(f"{int(w_act)}x{int(h_act)}")
                 
                 probed_cams.append({
                     'index': i,
-                    'complexity': supported_count,
-                    'is_high_res': supported_count > 4
+                    'supported_resolutions': supported_res,
+                    'complexity': len(supported_res),
+                    'is_high_res': len(supported_res) > 4
                 })
                 cap.release()
         
@@ -452,18 +479,18 @@ class ImageProcessor:
                 'id': str(probed['index']), 
                 'name': name, 
                 'hardware_id': hw_id,
-                'type': 'stream'
+                'type': 'stream',
+                'resolutions': probed['supported_resolutions']
             })
                 
         logger.info(f"Camera discovery complete - Found {len(available_cameras)} camera(s)")
         return available_cameras
 
-    def read_frame(self, cam_id):
+    def read_frame(self, cam_id, target_res=None):
         """
         Reads a single frame from the camera. 
-        Assumes the camera is already opened and being read continuously.
         """
-        cap = self.get_cap(cam_id)
+        cap = self.get_cap(cam_id, target_res=target_res)
         if cap and cap.isOpened():
             # Retry logic for frame reading
             for _ in range(3):
@@ -483,8 +510,8 @@ class ImageProcessor:
                  
         return None
 
-    def capture_frame(self, cam_id):
-        cap = self.get_cap(cam_id)
+    def capture_frame(self, cam_id, target_res=None):
+        cap = self.get_cap(cam_id, target_res=target_res)
         if cap:
             # Aggressive flush for macOS/built-in cameras.
             # Reading 45 frames with a small delay (~1.5s total)
@@ -502,7 +529,7 @@ class ImageProcessor:
 
     def close(self):
         """Releases all video capture resources."""
-        for cap in self.caps.values():
+        for cap in list(self.caps.values()):
             if cap.isOpened():
                 cap.release()
         self.caps.clear()
@@ -542,9 +569,12 @@ class ImageProcessor:
                 src_w = 640.0
             else: # Likely 848 (16:9 480p) or slightly larger
                 src_w = 848.0
-        else:
+        elif ref_y <= 750: # Standard 720p
             src_h = 720.0
             src_w = 1280.0
+        else: # Standard 1080p or higher
+            src_h = 1080.0
+            src_w = 1920.0
             
         if os.environ.get('DEBUG_MONITOR'):
             logger.debug(f"DEBUG: Mapping {ref_x}x{ref_y} space to {fw}x{fh} frame. Assumed source: {src_w}x{src_h}")
