@@ -382,22 +382,31 @@ function bindCanvasEvents() {
         let nativeW = (target.tagName === 'VIDEO') ? target.videoWidth : (target.naturalWidth || target.width);
         const scale = renderedW / (nativeW || 1);
 
-        const visibleDisplays = window.appState.displays.filter(d => d.camId === window.appState.selectedCameraId);
+        const visibleDisplays = window.appState.displays.filter(d => (d.hardware_id || d.camId) === window.appState.selectedCameraId);
         let clickedOnExisting = false;
         const displayOrder = e.altKey ? visibleDisplays : [...visibleDisplays].reverse();
 
         for (const d of displayOrder) {
+            // Safe corners for interaction check
+            const corners = d.corners && d.corners.length === 4 ? d.corners : [
+                { x: d.x, y: d.y },
+                { x: d.x + d.w, y: d.y },
+                { x: d.x + d.w, y: d.y + d.h },
+                { x: d.x, y: d.y + d.h }
+            ];
+
             // Priority 1: Check corner handles
             let handleIdx = -1;
-            d.corners.forEach((c, idx) => {
+            corners.forEach((c, idx) => {
                 const sx = offsetX + c.x * scale;
                 const sy = offsetY + c.y * scale;
-                if (Math.abs(mouseX - sx) < 15 && Math.abs(mouseY - sy) < 15) handleIdx = idx;
+                if (Math.abs(mouseX - sx) < 20 && Math.abs(mouseY - sy) < 20) handleIdx = idx;
             });
 
             if (handleIdx !== -1) {
                 saveState();
                 activeDisplayId = d.id;
+                d.corners = corners; // Ensure corners are present if they were fallback
                 activeCornerIndex = handleIdx;
                 isResizing = true;
                 dragStartX = mouseX;
@@ -409,20 +418,20 @@ function bindCanvasEvents() {
             }
 
             // Priority 2: Check Rotation Handle
-            const s0 = { x: offsetX + d.corners[0].x * scale, y: offsetY + d.corners[0].y * scale };
-            const s1 = { x: offsetX + d.corners[1].x * scale, y: offsetY + d.corners[1].y * scale };
+            const s0 = { x: offsetX + corners[0].x * scale, y: offsetY + corners[0].y * scale };
+            const s1 = { x: offsetX + corners[1].x * scale, y: offsetY + corners[1].y * scale };
             const midX = (s0.x + s1.x) / 2;
             const midY = (s0.y + s1.y) / 2;
 
-            // Calculate normal vector for the offset
             const dx = s1.x - s0.x, dy = s1.y - s0.y;
             const len = Math.sqrt(dx * dx + dy * dy) || 1;
             const nx = -dy / len, ny = dx / len;
             const hrx = midX + nx * 40, hry = midY + ny * 40;
 
-            if (Math.abs(mouseX - hrx) < 15 && Math.abs(mouseY - hry) < 15) {
+            if (Math.abs(mouseX - hrx) < 20 && Math.abs(mouseY - hry) < 20) {
                 saveState();
                 activeDisplayId = d.id;
+                d.corners = corners;
                 isRotating = true;
                 displayCenter = getPolyCenter(d.corners);
                 rotateStartAngle = Math.atan2(mouseY - (offsetY + displayCenter.y * scale), mouseX - (offsetX + displayCenter.x * scale)) * 180 / Math.PI;
@@ -436,11 +445,11 @@ function bindCanvasEvents() {
             // Priority 3: Check Sides (Resizing)
             let sideIdx = -1;
             for (let i = 0; i < 4; i++) {
-                const head = d.corners[i];
-                const tail = d.corners[(i + 1) % 4];
+                const head = corners[i];
+                const tail = corners[(i + 1) % 4];
                 const sH = { x: offsetX + head.x * scale, y: offsetY + head.y * scale };
                 const sT = { x: offsetX + tail.x * scale, y: offsetY + tail.y * scale };
-                if (distToSegment({ x: mouseX, y: mouseY }, sH, sT) < 10) {
+                if (distToSegment({ x: mouseX, y: mouseY }, sH, sT) < 15) {
                     sideIdx = i;
                     break;
                 }
@@ -449,8 +458,9 @@ function bindCanvasEvents() {
             if (sideIdx !== -1) {
                 saveState();
                 activeDisplayId = d.id;
+                d.corners = corners;
                 activeSideIndex = sideIdx;
-                isResizing = false; // We are side-resizing
+                isResizing = false;
                 dragStartX = mouseX;
                 dragStartY = mouseY;
                 originalCorners = d.corners.map(c => ({ ...c }));
@@ -461,9 +471,10 @@ function bindCanvasEvents() {
 
             // Priority 4: Check polygon interior (Dragging)
             const nativePt = { x: (mouseX - offsetX) / scale, y: (mouseY - offsetY) / scale };
-            if (isPointInPoly(nativePt, d.corners)) {
+            if (isPointInPoly(nativePt, corners)) {
                 saveState();
                 activeDisplayId = d.id;
+                d.corners = corners;
                 isDragging = true;
                 dragStartX = mouseX;
                 dragStartY = mouseY;
@@ -481,10 +492,16 @@ function bindCanvasEvents() {
             const nx = (mouseX - offsetX) / scale;
             const ny = (mouseY - offsetY) / scale;
             const id = 'disp_' + Date.now();
+            const cam = window.appState.cameras.find(c => c.hardware_id === window.appState.selectedCameraId);
             const newD = {
-                id, name: 'New Display', camId: window.appState.selectedCameraId,
+                id,
+                name: 'New Display',
+                camId: cam ? cam.id : window.appState.selectedCameraId,
+                hardware_id: window.appState.selectedCameraId,
+                camera_name: cam ? cam.name : 'Unknown Camera',
                 corners: [{ x: nx, y: ny }, { x: nx, y: ny }, { x: nx, y: ny }, { x: nx, y: ny }],
-                rotation: 0, enablePerspective: false
+                rotation: 0,
+                enablePerspective: false
             };
             window.appState.displays.push(newD);
             activeDisplayId = id;
@@ -644,7 +661,7 @@ function renderOverlays() {
     const oy = mediaRect.top - rect.top;
     const scale = mediaRect.width / (target.videoWidth || target.naturalWidth || target.width || 1);
 
-    window.appState.displays.filter(d => d.hardware_id === window.appState.selectedCameraId).forEach(d => {
+    window.appState.displays.filter(d => (d.hardware_id || d.camId) === window.appState.selectedCameraId).forEach(d => {
         // Safe corners for rendering
         const corners = d.corners || [
             { x: d.x, y: d.y },
