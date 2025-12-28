@@ -162,7 +162,7 @@ function renderAnalysisDashboard(id, data) {
             console.error('[Analysis] Video playback failed:', video.error);
             const msg = document.createElement('div');
             msg.className = 'video-error-overlay';
-            msg.innerHTML = '<p>⚠️ This video uses an unsupported codec (mp4v). Only sessions recorded after the H.264 update are playable in this dashboard.</p>';
+            msg.innerHTML = '<p>⚠️ This video uses an unsupported codec.</p>';
             video.parentElement.appendChild(msg);
         };
     }
