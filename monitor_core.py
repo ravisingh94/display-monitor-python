@@ -577,15 +577,24 @@ class ImageProcessor:
             src_w = 1920.0
             
         if os.environ.get('DEBUG_MONITOR'):
-            logger.debug(f"DEBUG: Mapping {ref_x}x{ref_y} space to {fw}x{fh} frame. Assumed source: {src_w}x{src_h}")
+            logger.info(f"DEBUG: Frame: {fw}x{fh} | Reference Space: {src_w}x{src_h}")
             
-        # Calculate uniform scale based on height matching
-        # Most cameras/browsers match the height and crop or pillarbox the sides.
-        scale = fh / src_h
+        # CORRECTED SCALING LOGIC: WIDTH PREFERENCE
+        # Most webcams, when changing resolution (e.g. 1080p -> 480p),
+        # preserve the horizontal Field of View (width) and change the vertical crop.
+        # So we should calculate scale based on WIDTH.
+        scale = fw / src_w
         
-        # Center the config space in the capture frame
+        # Calculate offsets
+        # If the aspect ratios match, both offsets will be 0.
+        # If src is 16:9 (1080p) and frame is 4:3 (480p), the frame is "taller" relatively.
+        # So we expect vertical letterboxing (positive y offset) or just extra content.
+        # We center the src content in the frame.
         offset_x = (fw - (src_w * scale)) / 2.0
         offset_y = (fh - (src_h * scale)) / 2.0
+        
+        if os.environ.get('DEBUG_MONITOR'):
+            logger.info(f"DEBUG: Scale: {scale:.4f} | Offsets: x={offset_x:.1f}, y={offset_y:.1f}")
         
         # Map corners: Scale + Center
         scaled_corners = [{'x': c['x'] * scale + offset_x, 'y': c['y'] * scale + offset_y} for c in corners]
