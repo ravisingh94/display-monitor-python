@@ -809,6 +809,21 @@ def get_config():
     """Returns monitor param config"""
     return jsonify(monitor_sys.loader.monitor_config)
 
+@app.route('/api/app/config')
+def get_app_config():
+    """Returns application-level config (e.g., single-tab enforcement)"""
+    try:
+        with open('config.yaml', 'r') as f:
+            config_data = yaml.safe_load(f)
+            app_config = config_data.get('config', {})
+            return jsonify({
+                'single_tab_enforcement': app_config.get('single_tab_enforcement', True)
+            })
+    except Exception as e:
+        print(f"Error loading app config: {e}")
+        return jsonify({'single_tab_enforcement': True})  # Default to enabled
+
+
 import base64
 
 @app.route('/api/ocr/detect', methods=['POST'])
