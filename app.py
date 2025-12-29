@@ -542,7 +542,8 @@ class MonitorSystem:
                         did = d['id']
                         try:
                             # Extract region (KEEP CLEAN in internal storage)
-                            disp_frame = self.processor.process_display(frame, d)
+                            # Pass target_res as reference_resolution so coordinates scale correctly
+                            disp_frame = self.processor.process_display(frame, d, reference_resolution=target_res)
                             if disp_frame is None:
                                 continue
                             

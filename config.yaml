@@ -5,7 +5,7 @@ config:
   content_variance: 30
   diff_threshold: 0.5
   edge_threshold: 1.2
-  frozen_frames: 5
+  frozen_frames: 60
   single_tab_enforcement: false  # Enable/disable single-tab enforcement
 
 glitch_detector:

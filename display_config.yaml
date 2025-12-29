@@ -6,8 +6,8 @@ cameras:
   6C707041-05AC-0010-0008-000000000001:
     resolution: 1920x1080
 displays:
-- camId: '1'
-  camera_name: MacBook Pro Camera (Device 1)
+- camId: '0'
+  camera_name: MacBook Pro Camera (Device 0)
   corners:
   - x: 777.0761726700104
     y: 253.16163839196398
@@ -26,8 +26,8 @@ displays:
   w: 423.20751723043634
   x: 777.0761726700104
   y: 249.77060580764007
-- camId: '1'
-  camera_name: MacBook Pro Camera (Device 1)
+- camId: '0'
+  camera_name: MacBook Pro Camera (Device 0)
   corners:
   - x: 41.222101871718635
     y: 439.66843052977987
@@ -46,8 +46,8 @@ displays:
   w: 1835.5725886013508
   x: 41.222101871718635
   y: 439.1032584323926
-- camId: '1'
-  camera_name: MacBook Pro Camera (Device 1)
+- camId: '0'
+  camera_name: MacBook Pro Camera (Device 0)
   corners:
   - x: 804.2044333446017
     y: 46.87382284559183
@@ -66,48 +66,48 @@ displays:
   w: 385.9061588028726
   x: 804.2044333446017
   y: 35.00520880045808
-- camId: '0'
-  camera_name: HP 320 FHD Webcam (Device 0)
+- camId: '1'
+  camera_name: HP 320 FHD Webcam (Device 1)
   corners:
-  - x: 635.3264075533923
-    y: 202.80036769858066
-  - x: 1314.7921034610008
-    y: 12.700592556697643
-  - x: 1405.2385067008408
-    y: 590.0773321147245
-  - x: 729.5827318762026
-    y: 651.5073510040446
+  - x: 611.5492548679706
+    y: 225.0914483411635
+  - x: 1332.6249679750672
+    y: 55.79668179902448
+  - x: 1403.7524346580021
+    y: 587.1051880290468
+  - x: 714.7220114478141
+    y: 688.6591520750161
   enablePerspective: true
-  h: 638.806758447347
+  h: 632.8624702759917
   hardware_id: '0x210000003f0654a'
   id: disp_1766996474213
   name: hpDisplay
   rotation: 15
-  w: 769.9120991474485
-  x: 635.3264075533923
-  y: 12.700592556697643
-- camId: '0'
-  camera_name: HP 320 FHD Webcam (Device 0)
+  w: 792.2031797900315
+  x: 611.5492548679706
+  y: 55.79668179902448
+- camId: '1'
+  camera_name: HP 320 FHD Webcam (Device 1)
   corners:
-  - x: 735.8879979765461
-    y: 665.1953334427487
-  - x: 1393.2230471240741
-    y: 606.4704549410242
-  - x: 1366.7731848166313
-    y: 929.1134087559772
-  - x: 628.0032880261497
-    y: 920.1272683326608
+  - x: 697.2501248627359
+    y: 720.1799990277865
+  - x: 1399.1673352954297
+    y: 648.0804721405123
+  - x: 1356.3706805167594
+    y: 960.3209216555932
+  - x: 574.5046944839509
+    y: 972.1397898320208
   enablePerspective: true
-  h: 322.642953814953
+  h: 324.05931769150857
   hardware_id: '0x210000003f0654a'
   id: disp_1766997883666
   name: keyboard
   rotation: 0
-  w: 765.2197590979245
-  x: 628.0032880261497
-  y: 606.4704549410242
-- camId: '0'
-  camera_name: HP 320 FHD Webcam (Device 0)
+  w: 824.6626408114788
+  x: 574.5046944839509
+  y: 648.0804721405123
+- camId: '1'
+  camera_name: HP 320 FHD Webcam (Device 1)
   corners:
   - x: 561.5296118004169
     y: 8.428385690905046

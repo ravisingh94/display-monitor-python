@@ -548,33 +548,49 @@ class ImageProcessor:
         bot = sorted(sorted_y[2:], key=lambda c: c['x'], reverse=True)
         return [top[0], top[1], bot[0], bot[1]]
 
-    def process_display(self, frame, display_data, global_max_x=None, global_max_y=None):
+    def process_display(self, frame, display_data, reference_resolution=None):
         """
         Crops, warps, and rotates the frame according to display_data.
-        Automatically scales coordinates if frame resolution differs from 
-        the standard browser resolutions (640x480 or 1280x720).
+        
+        Args:
+            frame: Input camera frame
+            display_data: Display configuration dict
+            reference_resolution: (width, height) tuple of the resolution used when 
+                                defining coordinates. If None, will try to auto-detect.
         """
         fh, fw = frame.shape[:2]
         corners = display_data.get('corners', [])
         
-        # Determine reference resolution (src_w, src_h)
-        # Use provided global hints or fall back to local display bounds
-        ref_x = global_max_x if global_max_x is not None else (max([c['x'] for c in corners]) if corners else 0)
-        ref_y = global_max_y if global_max_y is not None else (max([c['y'] for c in corners]) if corners else 0)
-        
-        # Determine likely source resolution with a buffer zone (common browser defaults)
-        if ref_y <= 540: # Standard is 480, allowing up to 540
-            src_h = 480.0
-            if ref_x <= 720: # Standard is 640, allowing up to 720
-                src_w = 640.0
-            else: # Likely 848 (16:9 480p) or slightly larger
-                src_w = 848.0
-        elif ref_y <= 750: # Standard 720p
-            src_h = 720.0
-            src_w = 1280.0
-        else: # Standard 1080p or higher
-            src_h = 1080.0
-            src_w = 1920.0
+        # IMPORTANT: For perspective transforms, coordinates should be at camera's actual resolution
+        # Use frame dimensions directly as reference to avoid scaling issues
+        if display_data.get('enablePerspective', False):
+            src_w, src_h = float(fw), float(fh)
+            logger.debug(f"[{display_data.get('name', 'unknown')}] Perspective mode: Using frame resolution as reference: {src_w}x{src_h}")
+        elif reference_resolution:
+            # Use explicitly provided reference resolution for non-perspective displays
+            src_w, src_h = float(reference_resolution[0]), float(reference_resolution[1])
+            logger.debug(f"[{display_data.get('name', 'unknown')}] Using provided reference resolution: {src_w}x{src_h}")
+        else:
+            # Fall back to auto-detection based on coordinate bounds
+            ref_x = max([c['x'] for c in corners]) if corners else 0
+            ref_y = max([c['y'] for c in corners]) if corners else 0
+            
+            # Determine likely source resolution with a buffer zone (common browser defaults)
+            if ref_y <= 540: # Standard is 480, allowing up to 540
+                src_h = 480.0
+                if ref_x <= 720: # Standard is 640, allowing up to 720
+                    src_w = 640.0
+                else: # Likely 848 (16:9 480p) or slightly larger
+                    src_w = 848.0
+            elif ref_y <= 750: # Standard 720p
+                src_h = 720.0
+                src_w = 1280.0
+            else: # Standard 1080p or higher
+                src_h = 1080.0
+                src_w = 1920.0
+            
+            logger.debug(f"[{display_data.get('name', 'unknown')}] Auto-detected reference resolution: {src_w}x{src_h} (from coords max {ref_x:.1f}x{ref_y:.1f})")
+
             
         if os.environ.get('DEBUG_MONITOR'):
             logger.info(f"DEBUG: Frame: {fw}x{fh} | Reference Space: {src_w}x{src_h}")
@@ -605,18 +621,55 @@ class ImageProcessor:
             return frame[y:y+h, x:x+w]
 
         if display_data.get('enablePerspective', False):
-            # Normalize corners to camera-up orientation
-            norm_corners = self.get_normalized_corners(scaled_corners)
-            src_pts = np.float32([[c['x'], c['y']] for c in norm_corners])
+            # IMPORTANT: Preserve the original corner order for rotated/skewed displays
+            # The user defines corners in a specific sequence during configuration
+            # Reordering them breaks the perspective transform for rotated displays
+            
+            # Use corners directly in their original order (assumed to be TL, TR, BR, BL)
+            src_pts = np.float32([[c['x'], c['y']] for c in scaled_corners])
+            
+            # Validate corners are within frame bounds
+            fh, fw = frame.shape[:2]
+            valid_corners = True
+            for i, pt in enumerate(src_pts):
+                if pt[0] < 0 or pt[0] >= fw or pt[1] < 0 or pt[1] >= fh:
+                    logger.warning(f"Corner {i} out of bounds: ({pt[0]:.1f}, {pt[1]:.1f}) for frame {fw}x{fh}")
+                    valid_corners = False
+            
+            if not valid_corners:
+                logger.error(f"Invalid perspective corners for {display_data.get('name', 'unknown')}, using bounding box instead")
+                # Fall back to bounding box
+                xs = [c['x'] for c in scaled_corners]
+                ys = [c['y'] for c in scaled_corners]
+                x1, y1, x2, y2 = max(0, int(min(xs))), max(0, int(min(ys))), min(fw, int(max(xs))), min(fh, int(max(ys)))
+                if x2 > x1 and y2 > y1:
+                    crop = frame[y1:y2, x1:x2]
+                    dst_w = int(display_data.get('w', 400))
+                    dst_h = int(display_data.get('h', 300))
+                    return cv2.resize(crop, (dst_w, dst_h))
+                else:
+                    return np.zeros((int(display_data.get('h', 300)), int(display_data.get('w', 400)), 3), dtype=np.uint8)
             
             # Dimensions are expected output size (from config)
             dst_w = int(display_data.get('w', 400))
             dst_h = int(display_data.get('h', 300))
             dst_pts = np.float32([[0, 0], [dst_w, 0], [dst_w, dst_h], [0, dst_h]])
             
-            M = cv2.getPerspectiveTransform(src_pts, dst_pts)
-            warped = cv2.warpPerspective(frame, M, (dst_w, dst_h))
-            return warped
+            try:
+                M = cv2.getPerspectiveTransform(src_pts, dst_pts)
+                warped = cv2.warpPerspective(frame, M, (dst_w, dst_h))
+                return warped
+            except cv2.error as e:
+                logger.error(f"Perspective transform failed for {display_data.get('name', 'unknown')}: {e}")
+                # Fall back to bounding box
+                xs = [c['x'] for c in scaled_corners]
+                ys = [c['y'] for c in scaled_corners]
+                x1, y1, x2, y2 = max(0, int(min(xs))), max(0, int(min(ys))), min(fw, int(max(xs))), min(fh, int(max(ys)))
+                if x2 > x1 and y2 > y1:
+                    crop = frame[y1:y2, x1:x2]
+                    return cv2.resize(crop, (dst_w, dst_h))
+                else:
+                    return np.zeros((dst_h, dst_w, 3), dtype=np.uint8)
         else:
             # Standard crop (bounding box) using scaled corners
             xs = [c['x'] for c in scaled_corners]
