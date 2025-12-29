@@ -6,7 +6,7 @@ config:
   diff_threshold: 0.5
   edge_threshold: 1.2
   frozen_frames: 60
-  single_tab_enforcement: false  # Enable/disable single-tab enforcement
+  single_tab_enforcement: true  # Enable/disable single-tab enforcement
 
 glitch_detector:
   black_threshold: 0.5

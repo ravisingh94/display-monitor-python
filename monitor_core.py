@@ -565,11 +565,11 @@ class ImageProcessor:
         # Use frame dimensions directly as reference to avoid scaling issues
         if display_data.get('enablePerspective', False):
             src_w, src_h = float(fw), float(fh)
-            logger.debug(f"[{display_data.get('name', 'unknown')}] Perspective mode: Using frame resolution as reference: {src_w}x{src_h}")
+            # logger.debug(f"[{display_data.get('name', 'unknown')}] Perspective mode: Using frame resolution as reference: {src_w}x{src_h}")
         elif reference_resolution:
             # Use explicitly provided reference resolution for non-perspective displays
             src_w, src_h = float(reference_resolution[0]), float(reference_resolution[1])
-            logger.debug(f"[{display_data.get('name', 'unknown')}] Using provided reference resolution: {src_w}x{src_h}")
+            # logger.debug(f"[{display_data.get('name', 'unknown')}] Using provided reference resolution: {src_w}x{src_h}")
         else:
             # Fall back to auto-detection based on coordinate bounds
             ref_x = max([c['x'] for c in corners]) if corners else 0
@@ -589,7 +589,7 @@ class ImageProcessor:
                 src_h = 1080.0
                 src_w = 1920.0
             
-            logger.debug(f"[{display_data.get('name', 'unknown')}] Auto-detected reference resolution: {src_w}x{src_h} (from coords max {ref_x:.1f}x{ref_y:.1f})")
+            # logger.debug(f"[{display_data.get('name', 'unknown')}] Auto-detected reference resolution: {src_w}x{src_h} (from coords max {ref_x:.1f}x{ref_y:.1f})")
 
             
         if os.environ.get('DEBUG_MONITOR'):
