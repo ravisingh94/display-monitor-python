@@ -15,6 +15,7 @@ A professional-grade system for configuring, monitoring, and analyzing multiple 
 - **Live Camera Streaming**: Real-time camera feed with browser-based access.
 - **Hardened Hardware Discovery**: "Fuzzy Matching" reconciles camera names even if hardware IDs change.
 - **Manual Area Selection**: Draw and rotate display regions with intuitive handles.
+- **Robust Resolution Handling**: Intelligent width-based scaling ensures correct region capture even if camera resolution falls back (e.g. 1080p -> 480p).
 - **Perspective Correction (RECTIFY)**: Bilinear homography using 16-cell subdivision for high-fidelity warping.
 - **Configuration Persistence**: Save to `display_config.yaml` with persistent Display IDs.
 
@@ -114,5 +115,5 @@ negative_text:
 
 ---
 
-**Version**: 1.4.0  
-**Last Updated**: December 27, 2025
+**Version**: 1.4.1  
+**Last Updated**: December 29, 2025
