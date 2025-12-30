@@ -10,6 +10,9 @@ import logging
 logger = logging.getLogger('monitor_core')
 from glitch_logic import GlitchDetector
 
+# Global lock for OCR to prevent segmentation faults with EasyOCR/Torch in multi-threaded environments
+GLOBAL_OCR_LOCK = threading.Lock()
+
 class DisplayStatusEngine:
     def __init__(self, config=None):
         if config is None:
@@ -93,8 +96,10 @@ class DisplayStatusEngine:
             # EasyOCR performs better with RGB
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             
-            # reader.readtext(...) returns list of (bbox, text, prob)
-            results = self.ocr_reader.readtext(rgb_frame)
+            # Use global lock for the actual OCR call
+            with GLOBAL_OCR_LOCK:
+                # reader.readtext(...) returns list of (bbox, text, prob)
+                results = self.ocr_reader.readtext(rgb_frame)
         except Exception as e:
              logger.error(f"{context}OCR error during readtext: {e}")
              return None
@@ -135,6 +140,7 @@ class DisplayStatusEngine:
         """
         Evaluates a BGR frame and returns (status, metrics)
         """
+        # 1. Basic Metrics (using grayscale)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         h, w = gray.shape
         total_pixels = h * w
@@ -185,8 +191,8 @@ class DisplayStatusEngine:
 
         self.prev_gray = gray.copy()
         
-        # Glitch detection
-        glitch_result = self.glitch_detector.detect(frame, display_name=display_name, camera_id=camera_id)
+        # Glitch detection - Pass gray frame to avoid redundant conversion
+        glitch_result = self.glitch_detector.detect(frame, gray=gray, display_name=display_name, camera_id=camera_id)
         
         # OCR Detection
         now = time.time()

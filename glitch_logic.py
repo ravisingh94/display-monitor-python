@@ -39,7 +39,7 @@ class GlitchDetector:
             "mean_brightness": 0.0
         }
 
-    def detect(self, frame, display_name=None, camera_id=None):
+    def detect(self, frame, gray=None, display_name=None, camera_id=None):
         # Build context string for logging
         context = ""
         if display_name and camera_id:
@@ -55,8 +55,13 @@ class GlitchDetector:
             target_w = 640
             target_h = int(h * (target_w / w))
             frame = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
-
-        gray_raw = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            # If we resized, the passed gray is invalid
+            gray_raw = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        elif gray is not None:
+            gray_raw = gray
+        else:
+            gray_raw = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        
         noise_variance = cv2.Laplacian(gray_raw, cv2.CV_64F).var()
 
         gray = cv2.GaussianBlur(gray_raw, (5, 5), 0)
